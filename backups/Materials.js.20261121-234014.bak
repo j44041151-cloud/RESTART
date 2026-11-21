@@ -1,0 +1,100 @@
+import * as THREE from 'three';
+import { getSurface } from './Textures.js';
+
+/**
+ * Central PBR material library. Materials are shared across merged city
+ * geometry so the whole city renders with only a handful of draw calls.
+ */
+export function createMaterials() {
+  const M = {};
+
+  const std = (surfaceName, opts = {}) => {
+    const s = getSurface(surfaceName);
+    const m = new THREE.MeshStandardMaterial({
+      map: s.map,
+      normalMap: s.normalMap,
+      roughnessMap: s.roughnessMap,
+      metalnessMap: s.metalnessMap || null,
+      roughness: 1,
+      metalness: opts.metalness ?? 1,
+      envMapIntensity: opts.envMapIntensity ?? 0.85,
+      color: new THREE.Color(opts.color ?? 0xffffff),
+      ...opts.extra,
+    });
+    if (s.normalMap) m.normalScale.set(opts.normalStrength ?? 1, opts.normalStrength ?? 1);
+    return m;
+  };
+
+  M.concrete = std('concrete', { metalness: 0, envMapIntensity: 0.55 });
+  M.facade = std('facade', { metalness: 0, envMapIntensity: 0.5, normalStrength: 0.8 });
+  M.facadePale = std('facadePale', { metalness: 0, envMapIntensity: 0.5, normalStrength: 0.8 });
+  M.facadeDark = std('facadeDark', { metalness: 0.15, envMapIntensity: 0.7, normalStrength: 0.8 });
+  M.concreteDark = std('concrete', { metalness: 0, color: 0x6c6e6b, envMapIntensity: 0.4 });
+  M.concretePale = std('concrete', { metalness: 0, color: 0xd8d2c2, envMapIntensity: 0.5 });
+  M.asphalt = std('asphalt', { metalness: 0, color: 0xb9bcc0, envMapIntensity: 0.35 });
+  M.road = std('asphalt', { metalness: 0, color: 0x8c9095, envMapIntensity: 0.3 });
+  M.metal = std('rust', { metalness: 1, color: 0xb8b8b4, envMapIntensity: 1.1 });
+  M.metalDark = std('rust', { metalness: 1, color: 0x5e605e, envMapIntensity: 0.9 });
+  M.rubber = new THREE.MeshStandardMaterial({ color: 0x121315, roughness: 0.92, metalness: 0.05 });
+  M.glass = std('glass', { metalness: 0.6, envMapIntensity: 1.4, roughness: 0.6 });
+  M.glassDark = std('glass', { metalness: 0.8, color: 0x6a7f88, envMapIntensity: 1.6 });
+  M.cream = std('cream', { metalness: 0.35, envMapIntensity: 0.8 });
+  M.rustPaint = std('rustPaint', { metalness: 0.4, envMapIntensity: 0.7 });
+  M.tealPaint = std('tealPaint', { metalness: 0.45, envMapIntensity: 0.8 });
+  M.solar = std('solar', { metalness: 1, envMapIntensity: 1.5, roughness: 0.8 });
+  M.bark = std('bark', { metalness: 0, envMapIntensity: 0.4 });
+  M.foliage = std('foliage', { metalness: 0, envMapIntensity: 0.35, color: 0x93a878 });
+  M.fabric = std('fabric', { metalness: 0.05, envMapIntensity: 0.4 });
+  M.ground = std('ground', { metalness: 0, envMapIntensity: 0.35 });
+  M.water = std('water', {
+    metalness: 0.35, envMapIntensity: 2, roughness: 0.55,
+    color: 0xbfe9ff, extra: { transparent: true, opacity: 0.82 },
+  });
+
+  // --- Emissive / sci-fi ------------------------------------------------
+  M.emissiveAmber = new THREE.MeshStandardMaterial({
+    color: 0x2a1a06, emissive: 0xff9a2e, emissiveIntensity: 0.9,
+    roughness: 0.4, metalness: 0.2,
+  });
+  M.emissiveCyan = new THREE.MeshStandardMaterial({
+    color: 0x06181a, emissive: 0x54f4e4, emissiveIntensity: 1.1,
+    roughness: 0.35, metalness: 0.2,
+  });
+  M.emissiveGreen = new THREE.MeshStandardMaterial({
+    color: 0x04180c, emissive: 0x59ff9b, emissiveIntensity: 1.0,
+    roughness: 0.4, metalness: 0.1,
+  });
+  M.emissiveRed = new THREE.MeshStandardMaterial({
+    color: 0x1a0404, emissive: 0xff4a3a, emissiveIntensity: 0.9,
+    roughness: 0.4, metalness: 0.1,
+  });
+  M.screen = new THREE.MeshStandardMaterial({
+    color: 0x05100f, emissive: 0x2bd8c8, emissiveIntensity: 0.55,
+    roughness: 0.25, metalness: 0.5,
+  });
+  M.neon = new THREE.MeshBasicMaterial({ color: 0xffb347, toneMapped: false });
+  M.neonCyan = new THREE.MeshBasicMaterial({ color: 0x5ff2e0, toneMapped: false });
+  M.marker = new THREE.MeshBasicMaterial({
+    color: 0xffb347, transparent: true, opacity: 0.85, toneMapped: false,
+    side: THREE.DoubleSide,
+  });
+
+  M.vineDead = new THREE.MeshStandardMaterial({
+    map: M.foliage.map, color: 0x5a5138, roughness: 1, metalness: 0,
+    transparent: true, alphaTest: 0.4, side: THREE.DoubleSide,
+  });
+
+  // Foliage cards: alpha-tested leaves.
+  M.leafCard = new THREE.MeshStandardMaterial({
+    map: M.foliage.map,
+    normalMap: M.foliage.normalMap,
+    color: 0x8fae6e,
+    roughness: 1,
+    metalness: 0,
+    transparent: true,
+    alphaTest: 0.32,
+    side: THREE.DoubleSide,
+  });
+
+  return M;
+}

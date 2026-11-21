@@ -1,0 +1,484 @@
+import * as THREE from 'three';
+import { clamp } from '../core/utils.js';
+
+const HIP_Y = 0.98;
+const TAU = Math.PI * 2;
+
+const lerp = (a, b, t) => a + (b - a) * t;
+
+function std(color, roughness = 0.7, metalness = 0.05) {
+  return new THREE.MeshStandardMaterial({ color, roughness, metalness, envMapIntensity: 0.85 });
+}
+
+function addMesh(parent, geometry, material, pos = [0, 0, 0], rot = null) {
+  const m = new THREE.Mesh(geometry, material);
+  m.position.set(pos[0], pos[1], pos[2]);
+  if (rot) m.rotation.set(rot[0], rot[1], rot[2]);
+  m.castShadow = true;
+  m.receiveShadow = true;
+  parent.add(m);
+  return m;
+}
+
+function box(parent, material, w, h, d, pos, rot) {
+  return addMesh(parent, new THREE.BoxGeometry(w, h, d), material, pos, rot);
+}
+
+function cyl(parent, material, rTop, rBottom, h, pos, seg = 12, rot) {
+  return addMesh(parent, new THREE.CylinderGeometry(rTop, rBottom, h, seg), material, pos, rot);
+}
+
+function ball(parent, material, r, pos, scale, seg = 16) {
+  const m = addMesh(parent, new THREE.SphereGeometry(r, seg, Math.max(8, seg >> 1)), material, pos);
+  if (scale) m.scale.set(scale[0], scale[1], scale[2]);
+  return m;
+}
+
+/** Bake same-material meshes into one buffer geometry (position/normal/uv). */
+function mergeSimple(geometries) {
+  let vertexCount = 0;
+  let indexCount = 0;
+  for (const g of geometries) {
+    vertexCount += g.attributes.position.count;
+    indexCount += g.index ? g.index.count : g.attributes.position.count;
+  }
+  const pos = new Float32Array(vertexCount * 3);
+  const nor = new Float32Array(vertexCount * 3);
+  const uv = new Float32Array(vertexCount * 2);
+  const idx = new Uint32Array(indexCount);
+  let vo = 0;
+  let io = 0;
+  for (const g of geometries) {
+    const p = g.attributes.position;
+    pos.set(p.array, vo * 3);
+    if (g.attributes.normal) nor.set(g.attributes.normal.array, vo * 3);
+    if (g.attributes.uv) uv.set(g.attributes.uv.array, vo * 2);
+    if (g.index) {
+      const ia = g.index.array;
+      for (let i = 0; i < ia.length; i++) idx[io + i] = ia[i] + vo;
+      io += ia.length;
+    } else {
+      for (let i = 0; i < p.count; i++) idx[io + i] = i + vo;
+      io += p.count;
+    }
+    vo += p.count;
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  out.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+  out.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  out.setIndex(new THREE.BufferAttribute(idx, 1));
+  return out;
+}
+
+/**
+ * The Restorer - a stylised male protagonist built entirely from procedural
+ * three.js geometry: dark tousled hair, charcoal tech jacket, glowing chest
+ * core, backpack, utility belt, cargo trousers and boots.
+ *
+ * The rig is a hierarchy of pivots (hips > torso > head/arms, hips > legs), so
+ * every joint can be posed procedurally. Local +Z is forward.
+ */
+export class Restorer {
+  constructor({ accentMaterial } = {}) {
+    this.time = 0;
+    this.cycle = 0;
+
+    this.accent = accentMaterial || new THREE.MeshBasicMaterial({ color: 0x49c8ff, toneMapped: false });
+
+    this.mat = {
+      skin: std(0xa4715a, 0.68, 0.02),
+      skinShade: std(0x8d5c47, 0.72, 0.02),
+      lip: std(0x7c4b43, 0.62, 0.02),
+      hair: std(0x17120f, 0.9, 0.04),
+      brow: std(0x1d1613, 0.85, 0.02),
+      eyeWhite: std(0xd8d4cc, 0.32, 0.05),
+      iris: std(0x2f5a6b, 0.28, 0.1),
+      pupil: std(0x05070a, 0.2, 0.02),
+      jacket: std(0x2f343d, 0.55, 0.14),
+      jacketDark: std(0x20242b, 0.62, 0.12),
+      jacketLight: std(0x3b424d, 0.5, 0.2),
+      trousers: std(0x1d2127, 0.8, 0.05),
+      trousersDark: std(0x15181d, 0.85, 0.04),
+      boots: std(0x191b1f, 0.42, 0.38),
+      sole: std(0x0e1012, 0.9, 0.08),
+      glove: std(0x252a31, 0.58, 0.18),
+      strap: std(0x14171b, 0.86, 0.06),
+      backpack: std(0x272c34, 0.76, 0.08),
+      tech: std(0x4b5563, 0.32, 0.86),
+      techDark: std(0x2a313a, 0.48, 0.72),
+    };
+
+    // Cosmetic / glow pieces are merged but skip the shadow pass; only the
+    // large volumes cast shadows, which keeps the character cheap to render.
+    this.noShadowMats = new Set([
+      this.accent, this.mat.eyeWhite, this.mat.iris, this.mat.pupil,
+      this.mat.brow, this.mat.lip, this.mat.skinShade, this.mat.tech, this.mat.techDark,
+    ]);
+
+    this.root = new THREE.Group();
+    this.root.name = 'TheRestorer';
+    this.bones = {};
+
+    this._build();
+  }
+
+  _build() {
+    const M = this.mat;
+
+    // ---------------------------------------------------------------- hips --
+    const hips = new THREE.Group();
+    hips.position.set(0, HIP_Y, 0);
+    this.root.add(hips);
+    this.hipGroup = hips;
+
+    cyl(hips, M.trousers, 0.172, 0.158, 0.16, [0, -0.03, 0], 14).scale.z = 0.8;
+    // belt
+    const belt = cyl(hips, M.techDark, 0.174, 0.174, 0.062, [0, 0.045, 0], 14);
+    belt.scale.z = 0.8;
+    box(hips, M.tech, 0.085, 0.055, 0.022, [0, 0.045, 0.132]);
+    box(hips, this.accent, 0.042, 0.018, 0.012, [0, 0.045, 0.146]);
+    box(hips, M.techDark, 0.07, 0.09, 0.055, [0.132, 0.02, 0.075], [0, 0.5, 0]);
+    box(hips, M.techDark, 0.065, 0.08, 0.05, [-0.135, 0.02, 0.06], [0, -0.55, 0]);
+    box(hips, M.techDark, 0.11, 0.075, 0.045, [0, 0.02, -0.135]);
+
+    // ---------------------------------------------------------------- legs --
+    const buildLeg = (side) => {
+      const sx = side === 'L' ? -1 : 1;
+      const thigh = new THREE.Group();
+      thigh.position.set(sx * 0.105, -0.02, 0);
+      hips.add(thigh);
+
+      cyl(thigh, M.trousers, 0.098, 0.082, 0.44, [0, -0.22, 0], 12);
+      // cargo pocket + flap on the outside of the thigh
+      box(thigh, M.trousersDark, 0.055, 0.14, 0.115, [sx * 0.072, -0.24, 0.005]);
+      box(thigh, M.trousers, 0.06, 0.022, 0.12, [sx * 0.072, -0.168, 0.005]);
+      box(thigh, this.accent, 0.006, 0.05, 0.02, [sx * 0.101, -0.24, 0.03]);
+      // hip seam
+      cyl(thigh, M.trousersDark, 0.1, 0.096, 0.035, [0, -0.02, 0], 12);
+
+      const knee = new THREE.Group();
+      knee.position.set(0, -0.44, 0);
+      thigh.add(knee);
+
+      ball(knee, M.techDark, 0.062, [0, 0.0, 0.045], [1, 0.9, 0.85], 12);
+      box(knee, this.accent, 0.03, 0.008, 0.01, [0, 0.0, 0.098]);
+      cyl(knee, M.trousers, 0.078, 0.058, 0.4, [0, -0.2, 0], 12);
+      box(knee, M.trousersDark, 0.012, 0.13, 0.02, [sx * 0.055, -0.2, 0.03]);
+      box(knee, this.accent, 0.01, 0.075, 0.012, [sx * 0.062, -0.2, 0.03]);
+
+      const ankle = new THREE.Group();
+      ankle.position.set(0, -0.4, 0);
+      knee.add(ankle);
+
+      // futuristic boot
+      cyl(ankle, M.techDark, 0.082, 0.078, 0.05, [0, 0.075, 0.005], 12);
+      box(ankle, M.boots, 0.118, 0.15, 0.135, [0, 0.025, 0.005]);
+      box(ankle, M.techDark, 0.126, 0.045, 0.15, [0, -0.055, 0.012]);
+      box(ankle, M.boots, 0.118, 0.082, 0.24, [0, -0.062, 0.055]);
+      ball(ankle, M.boots, 0.058, [0, -0.068, 0.165], [1.02, 0.62, 0.9], 12);
+      box(ankle, M.tech, 0.122, 0.022, 0.075, [0, -0.093, 0.15]);
+      box(ankle, M.sole, 0.126, 0.03, 0.255, [0, -0.105, 0.055]);
+      box(ankle, M.boots, 0.108, 0.055, 0.07, [0, -0.08, -0.055]);
+      box(ankle, this.accent, 0.006, 0.012, 0.17, [sx * 0.064, -0.1, 0.06]);
+
+      return { thigh, knee, ankle };
+    };
+    const legL = buildLeg('L');
+    const legR = buildLeg('R');
+    this.thighL = legL.thigh;
+    this.thighR = legR.thigh;
+    this.kneeL = legL.knee;
+    this.kneeR = legR.knee;
+    this.ankleL = legL.ankle;
+    this.ankleR = legR.ankle;
+
+    // --------------------------------------------------------------- torso --
+    const torso = new THREE.Group();
+    torso.position.set(0, 0.06, 0);
+    hips.add(torso);
+    this.torso = torso;
+
+    // jacket body: tapered, flattened ellipse
+    const jacket = cyl(torso, M.jacket, 0.208, 0.168, 0.35, [0, 0.185, 0], 16);
+    jacket.scale.z = 0.72;
+    const chest = ball(torso, M.jacket, 0.2, [0, 0.31, -0.005], [1.06, 0.62, 0.78], 18);
+    chest.scale.z *= 1.0;
+    // hem + collar
+    const hem = cyl(torso, M.jacketDark, 0.174, 0.164, 0.05, [0, 0.02, 0], 16);
+    hem.scale.z = 0.72;
+    const collar = cyl(torso, M.jacketDark, 0.108, 0.118, 0.055, [0, 0.405, 0], 14);
+    collar.scale.z = 0.86;
+    // lapels and zip
+    box(torso, M.jacketLight, 0.062, 0.17, 0.018, [-0.055, 0.335, 0.135], [0, 0.16, 0.16]);
+    box(torso, M.jacketLight, 0.062, 0.17, 0.018, [0.055, 0.335, 0.135], [0, -0.16, -0.16]);
+    box(torso, M.tech, 0.014, 0.3, 0.012, [0, 0.25, 0.15]);
+    box(torso, M.jacketDark, 0.088, 0.08, 0.02, [0.108, 0.12, 0.138], [0, -0.1, 0]);
+    box(torso, M.jacketDark, 0.088, 0.08, 0.02, [-0.108, 0.12, 0.138], [0, 0.1, 0]);
+    box(torso, this.accent, 0.05, 0.008, 0.01, [0.108, 0.148, 0.148], [0, -0.1, 0]);
+    box(torso, this.accent, 0.05, 0.008, 0.01, [-0.108, 0.148, 0.148], [0, 0.1, 0]);
+    // collar tabs
+    box(torso, this.accent, 0.026, 0.012, 0.012, [-0.062, 0.4, 0.098], [0, 0.18, 0]);
+    box(torso, this.accent, 0.026, 0.012, 0.012, [0.062, 0.4, 0.098], [0, -0.18, 0]);
+
+    // ------------------------------------------------------ chest energy core --
+    const device = new THREE.Group();
+    device.position.set(0, 0.285, 0.148);
+    torso.add(device);
+    cyl(device, M.tech, 0.064, 0.064, 0.03, [0, 0, 0.008], 18, [Math.PI / 2, 0, 0]);
+    cyl(device, M.techDark, 0.05, 0.05, 0.034, [0, 0, 0.014], 16, [Math.PI / 2, 0, 0]);
+    this.ring = addMesh(device, new THREE.TorusGeometry(0.045, 0.0065, 8, 24), this.accent, [0, 0, 0.032]);
+    this.core = ball(device, this.accent, 0.026, [0, 0, 0.036], null, 14);
+    const haloMat = new THREE.MeshBasicMaterial({
+      color: 0x49c8ff, transparent: true, opacity: 0.2,
+      blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false,
+    });
+    this.halo = ball(device, haloMat, 0.052, [0, 0, 0.04], null, 14);
+    box(device, M.tech, 0.14, 0.012, 0.012, [0, 0.072, 0.006]);
+    box(device, M.tech, 0.14, 0.012, 0.012, [0, -0.072, 0.006]);
+
+    // ------------------------------------------------------------ backpack --
+    const pack = new THREE.Group();
+    pack.position.set(0, 0.26, -0.145);
+    torso.add(pack);
+    box(pack, M.backpack, 0.27, 0.31, 0.13, [0, 0, -0.04]);
+    box(pack, M.jacketDark, 0.205, 0.09, 0.115, [0, 0.19, -0.03]);
+    box(pack, M.techDark, 0.17, 0.1, 0.1, [0, -0.18, -0.02]);
+    box(pack, M.tech, 0.09, 0.03, 0.02, [0, -0.18, 0.035]);
+    for (let i = 0; i < 3; i++) {
+      box(pack, this.accent, 0.012, 0.1, 0.006, [(i - 1) * 0.065, 0.02, -0.108]);
+    }
+    cyl(pack, M.tech, 0.009, 0.006, 0.2, [-0.1, 0.28, -0.03], 8, [0, 0, 0.16]);
+    ball(pack, this.accent, 0.018, [-0.116, 0.38, -0.03], null, 8);
+    // shoulder straps
+    box(torso, M.strap, 0.048, 0.32, 0.024, [-0.112, 0.27, 0.112], [-0.1, 0.05, -0.06]);
+    box(torso, M.strap, 0.048, 0.32, 0.024, [0.112, 0.27, 0.112], [-0.1, -0.05, 0.06]);
+    box(torso, M.jacketDark, 0.06, 0.05, 0.03, [-0.112, 0.36, 0.108]);
+    box(torso, M.jacketDark, 0.06, 0.05, 0.03, [0.112, 0.36, 0.108]);
+
+    // ---------------------------------------------------------------- arms --
+    const buildArm = (side) => {
+      const sx = side === 'L' ? -1 : 1;
+      const shoulder = new THREE.Group();
+      shoulder.position.set(sx * 0.213, 0.36, 0);
+      torso.add(shoulder);
+
+      ball(shoulder, M.jacketLight, 0.086, [sx * 0.008, 0.012, 0], [1, 0.82, 0.95], 14);
+      box(shoulder, this.accent, 0.055, 0.008, 0.014, [sx * 0.02, 0.062, 0.012], [0, 0, sx * 0.1]);
+      cyl(shoulder, M.jacket, 0.066, 0.054, 0.28, [0, -0.145, 0], 12);
+      cyl(shoulder, this.accent, 0.058, 0.058, 0.013, [0, -0.065, 0], 12);
+      // elbow pad
+      const elbow = new THREE.Group();
+      elbow.position.set(0, -0.285, 0);
+      shoulder.add(elbow);
+      ball(elbow, M.jacketDark, 0.06, [0, 0.0, -0.005], [1, 0.95, 1], 12);
+      cyl(elbow, M.jacket, 0.055, 0.047, 0.26, [0, -0.13, 0], 12);
+      cyl(elbow, M.jacketDark, 0.052, 0.052, 0.035, [0, -0.235, 0], 12);
+      // forearm tech gauntlet
+      box(elbow, M.techDark, 0.082, 0.105, 0.075, [0, -0.155, 0.012]);
+      box(elbow, this.accent, 0.055, 0.009, 0.008, [0, -0.155, 0.052]);
+      box(elbow, this.accent, 0.05, 0.032, 0.006, [0, -0.105, 0.052]);
+
+      const hand = new THREE.Group();
+      hand.position.set(0, -0.268, 0);
+      elbow.add(hand);
+      box(hand, M.glove, 0.072, 0.088, 0.052, [0, -0.046, 0.002]);
+      box(hand, M.glove, 0.062, 0.062, 0.046, [0, -0.104, 0.004]);
+      box(hand, M.glove, 0.022, 0.042, 0.03, [sx * -0.046, -0.052, 0.012], [0, 0, sx * -0.55]);
+      box(hand, M.tech, 0.058, 0.016, 0.012, [0, -0.012, 0.028]);
+
+      return { shoulder, elbow, hand };
+    };
+    const armL = buildArm('L');
+    const armR = buildArm('R');
+    this.shoulderL = armL.shoulder;
+    this.shoulderR = armR.shoulder;
+    this.elbowL = armL.elbow;
+    this.elbowR = armR.elbow;
+    this.handL = armL.hand;
+    this.handR = armR.hand;
+
+    // ---------------------------------------------------------------- neck --
+    cyl(torso, M.skinShade, 0.05, 0.056, 0.1, [0, 0.44, 0.004], 12);
+    cyl(torso, M.techDark, 0.062, 0.066, 0.03, [0, 0.4, 0.002], 12);
+
+    // ---------------------------------------------------------------- head --
+    const head = new THREE.Group();
+    head.position.set(0, 0.46, 0.004);
+    torso.add(head);
+    this.head = head;
+
+    ball(head, M.skin, 0.12, [0, 0.098, 0.006], [0.88, 1.02, 0.94], 20);
+    ball(head, M.skin, 0.086, [0, 0.036, 0.022], [0.92, 0.78, 0.9], 16); // jaw
+    ball(head, M.skin, 0.03, [0, 0.108, 0.112], [0.55, 0.95, 0.8], 10); // nose bridge
+    box(head, M.skin, 0.03, 0.026, 0.036, [0, 0.092, 0.113], [0.12, 0, 0]); // nose tip
+    ball(head, M.skinShade, 0.026, [-0.104, 0.096, -0.004], [0.5, 1, 0.75], 10);
+    ball(head, M.skinShade, 0.026, [0.104, 0.096, -0.004], [0.5, 1, 0.75], 10);
+    // eyes
+    for (const sx of [-1, 1]) {
+      ball(head, M.eyeWhite, 0.0175, [sx * 0.041, 0.122, 0.1], [1, 1, 0.62], 12);
+      ball(head, M.iris, 0.0095, [sx * 0.041, 0.122, 0.11], [1, 1, 0.7], 10);
+      ball(head, M.pupil, 0.0045, [sx * 0.041, 0.122, 0.117], [1, 1, 0.8], 8);
+      box(head, M.brow, 0.056, 0.013, 0.018, [sx * 0.043, 0.146, 0.101], [0, sx * -0.1, sx * -0.12]);
+      // cheekbone shading
+      ball(head, M.skinShade, 0.024, [sx * 0.062, 0.09, 0.072], [1, 0.7, 0.5], 8);
+    }
+    box(head, M.lip, 0.044, 0.008, 0.012, [0, 0.055, 0.104]);
+    box(head, M.skinShade, 0.036, 0.006, 0.012, [0, 0.066, 0.101]);
+    // ears
+    ball(head, M.skin, 0.028, [-0.106, 0.106, 0.0], [0.45, 1.0, 0.7], 10);
+    ball(head, M.skin, 0.028, [0.106, 0.106, 0.0], [0.45, 1.0, 0.7], 10);
+
+    // hair: cap + tousled tufts + fringe + sideburns
+    ball(head, M.hair, 0.12, [0, 0.174, -0.012], [1.0, 0.64, 1.0], 18);
+    ball(head, M.hair, 0.1, [0, 0.12, -0.062], [1.06, 0.9, 0.8], 14);
+    const tufts = [
+      [-0.058, 0.212, 0.048, 0.045, 0.105, -0.5],
+      [0.006, 0.232, 0.03, 0.05, 0.12, -0.15],
+      [0.066, 0.21, 0.042, 0.043, 0.1, 0.55],
+      [-0.032, 0.22, -0.06, 0.05, 0.11, -2.6],
+      [0.052, 0.212, -0.058, 0.048, 0.11, 2.6],
+      [-0.092, 0.176, 0.0, 0.04, 0.09, -1.1],
+      [0.092, 0.176, -0.004, 0.04, 0.09, 1.1],
+    ];
+    for (const [x, y, z, r, h, rz] of tufts) {
+      const cone = addMesh(head, new THREE.ConeGeometry(r, h, 6), M.hair, [x, y, z], [0.2, 0, rz]);
+      cone.castShadow = true;
+    }
+    // fringe over the forehead
+    box(head, M.hair, 0.058, 0.02, 0.08, [-0.045, 0.166, 0.094], [-0.38, 0.15, 0.28]);
+    box(head, M.hair, 0.05, 0.018, 0.075, [0.018, 0.174, 0.098], [-0.35, -0.12, -0.1]);
+    box(head, M.hair, 0.046, 0.017, 0.07, [0.072, 0.16, 0.082], [-0.4, -0.2, -0.5]);
+    box(head, M.hair, 0.02, 0.075, 0.045, [-0.104, 0.084, 0.012]);
+    box(head, M.hair, 0.02, 0.075, 0.045, [0.104, 0.084, 0.012]);
+
+    // ------------------------------------------------------------- aliases --
+    this.bones = {
+      Hips: hips, Spine: torso, Spine1: torso, Spine2: torso, Head: head,
+      LeftUpLeg: legL.thigh, LeftLeg: legL.knee, LeftFoot: legL.ankle,
+      RightUpLeg: legR.thigh, RightLeg: legR.knee, RightFoot: legR.ankle,
+      LeftArm: armL.shoulder, LeftForeArm: armL.elbow, LeftHand: armL.hand,
+      RightArm: armR.shoulder, RightForeArm: armR.elbow, RightHand: armR.hand,
+    };
+
+    // Keep the pulsing glow pieces separate, then merge the rest per joint and
+    // material so a ~1.8 m character costs only a few dozen draw calls.
+    this.ring.userData.keep = true;
+    this.core.userData.keep = true;
+    this.halo.userData.keep = true;
+    this._mergeStatic(this.root);
+  }
+
+  _mergeStatic(node) {
+    const buckets = new Map();
+    for (const child of [...node.children]) {
+      if (!child.isMesh || child.userData.keep) continue;
+      child.updateMatrix();
+      const geo = child.geometry.clone();
+      geo.applyMatrix4(child.matrix);
+      if (!buckets.has(child.material)) buckets.set(child.material, []);
+      buckets.get(child.material).push(geo);
+      node.remove(child);
+      child.geometry.dispose();
+    }
+    for (const [material, geometries] of buckets) {
+      const merged = mergeSimple(geometries);
+      geometries.forEach((g) => g.dispose());
+      const mesh = new THREE.Mesh(merged, material);
+      // Only bulky volumes cast shadows; trims, glow strips and fingers are
+      // skipped, which keeps the character's shadow pass cheap.
+      merged.computeBoundingSphere();
+      mesh.castShadow = !this.noShadowMats.has(material) && merged.boundingSphere.radius > 0.105;
+      mesh.receiveShadow = true;
+      node.add(mesh);
+    }
+    for (const child of [...node.children]) {
+      if (child.isGroup) this._mergeStatic(child);
+    }
+  }
+
+  /**
+   * Procedural animation. Speeds are in m/s; weights blend between the idle,
+   * walk and run cycles, with an airborne overlay driven by airBlend/vy.
+   */
+  animate(dt, state = {}) {
+    dt = Math.min(dt, 0.05);
+    const t = (this.time += dt);
+    const speed = state.speed || 0;
+    const air = clamp(state.airBlend || 0, 0, 1);
+    const vy = state.vy || 0;
+    const surge = !!state.surge;
+
+    const runT = clamp((speed - 4.9) / 2.4, 0, 1);
+    const moveW = clamp(speed / 1.1, 0, 1);
+    const idleW = 1 - moveW;
+
+    if (moveW > 0.01) this.cycle += dt * (2.6 + speed * 0.85);
+    const swing = Math.sin(this.cycle);
+    const swingB = Math.sin(this.cycle + Math.PI);
+    const doubleSwing = Math.sin(this.cycle * 2);
+    const breathe = Math.sin(t * 1.55);
+
+    // ---- hips / torso: bob, sway and lean ----
+    this.hipGroup.position.y = HIP_Y + doubleSwing * (0.008 + 0.026 * runT) * moveW
+      - 0.055 * air + breathe * 0.0025 * idleW;
+    this.hipGroup.position.x = swing * 0.016 * moveW + Math.sin(t * 0.45) * 0.006 * idleW;
+    this.hipGroup.rotation.y = swing * 0.09 * moveW;
+    this.hipGroup.rotation.z = -swing * 0.026 * moveW;
+
+    this.torso.rotation.x = 0.015 + (0.05 + 0.1 * runT) * moveW + 0.14 * air + breathe * 0.01 * idleW;
+    this.torso.rotation.y = -swing * 0.075 * moveW;
+    this.torso.rotation.z = swing * 0.018 * moveW;
+    this.torso.position.y = 0.06 + breathe * 0.003 * idleW;
+
+    this.head.rotation.x = -this.torso.rotation.x * 0.55 - 0.06 * air + 0.03 * runT * moveW;
+    this.head.rotation.y = Math.sin(t * 0.42) * 0.1 * idleW - swing * 0.03 * moveW;
+    this.head.rotation.z = Math.sin(t * 0.31) * 0.015 * idleW;
+
+    // ---- legs ----
+    const amp = (0.34 + 0.5 * runT) * moveW;
+    const kneeAmp = 0.62 + 0.72 * runT;
+    let thighL = -swing * amp;
+    let thighR = -swingB * amp;
+    let kneeL = Math.max(0, -swing) * kneeAmp * moveW
+      + Math.max(0, swing) * 0.14 * moveW + 0.05 * moveW;
+    let kneeR = Math.max(0, -swingB) * kneeAmp * moveW
+      + Math.max(0, swingB) * 0.14 * moveW + 0.05 * moveW;
+
+    const rise = clamp(vy / 7, 0, 1);
+    const fall = clamp(-vy / 9, 0, 1);
+    thighL = lerp(thighL, -0.3 - 0.5 * rise + 0.18 * fall, air);
+    thighR = lerp(thighR, -0.12 - 0.32 * rise + 0.1 * fall, air);
+    kneeL = lerp(kneeL, 0.5 + 0.55 * rise - 0.15 * fall, air);
+    kneeR = lerp(kneeR, 0.36 + 0.4 * rise - 0.1 * fall, air);
+
+    this.thighL.rotation.x = thighL;
+    this.thighR.rotation.x = thighR;
+    this.thighL.rotation.z = -0.02 - 0.05 * air;
+    this.thighR.rotation.z = 0.02 + 0.05 * air;
+    this.kneeL.rotation.x = Math.max(0, kneeL);
+    this.kneeR.rotation.x = Math.max(0, kneeR);
+    this.ankleL.rotation.x = -0.25 * thighL - 0.4 * Math.max(0, kneeL) + 0.04;
+    this.ankleR.rotation.x = -0.25 * thighR - 0.4 * Math.max(0, kneeR) + 0.04;
+
+    // ---- arms ----
+    const armAmp = (0.3 + 0.55 * runT) * moveW;
+    this.shoulderL.rotation.x = swing * armAmp - air * (0.55 + 0.35 * rise) + breathe * 0.012 * idleW;
+    this.shoulderR.rotation.x = swingB * armAmp - air * (0.55 + 0.35 * rise) + breathe * 0.012 * idleW;
+    this.shoulderL.rotation.z = -0.06 - 0.1 * runT * moveW - air * 0.55;
+    this.shoulderR.rotation.z = 0.06 + 0.1 * runT * moveW + air * 0.55;
+    const elbow = -(0.14 + 0.5 * runT * moveW + 0.5 * air);
+    this.elbowL.rotation.x = elbow;
+    this.elbowR.rotation.x = elbow;
+    this.handL.rotation.z = 0.06;
+    this.handR.rotation.z = -0.06;
+
+    // ---- glowing chest core ----
+    const pulse = 0.5 + 0.5 * Math.sin(t * 3.4);
+    this.halo.material.opacity = 0.16 + 0.14 * pulse + (surge ? 0.12 : 0);
+    this.halo.material.color.copy(this.accent.color);
+    this.halo.scale.setScalar(1 + 0.06 * pulse + (surge ? 0.08 : 0));
+    this.core.scale.setScalar(1 + 0.04 * pulse);
+    this.ring.rotation.z += dt * (surge ? 1.6 : 0.5);
+  }
+}

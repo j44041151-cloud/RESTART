@@ -1,0 +1,120 @@
+/**
+ * Keyboard + mouse input with pointer lock and a drag fallback
+ * (useful when a browser refuses pointer lock).
+ */
+export class Input {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.keys = new Set();
+    this.pressed = new Set();
+    this.mouseDx = 0;
+    this.mouseDy = 0;
+    this.locked = false;
+    this.dragging = false;
+    this.sensitivity = 1;
+    this.enabled = true;
+    this.onEscape = null;
+    this.onKey = null;
+    this.anyInput = false;
+
+    this._onKeyDown = (e) => {
+      if (!this.enabled) return;
+      if (['Space', 'ShiftLeft', 'ShiftRight', 'KeyE', 'KeyH', 'KeyF'].includes(e.code)) e.preventDefault();
+      if (!this.keys.has(e.code)) this.pressed.add(e.code);
+      this.keys.add(e.code);
+      this.anyInput = true;
+      if (e.code === 'Escape') {
+        if (this.onEscape) this.onEscape();
+      }
+      if (this.onKey) this.onKey(e.code);
+    };
+    this._onKeyUp = (e) => {
+      this.keys.delete(e.code);
+    };
+    this._onMouseMove = (e) => {
+      if (this.locked) {
+        this.mouseDx += e.movementX || 0;
+        this.mouseDy += e.movementY || 0;
+      } else if (this.dragging) {
+        this.mouseDx += e.movementX || 0;
+        this.mouseDy += e.movementY || 0;
+      }
+    };
+    this._onMouseDown = () => {
+      this.dragging = true;
+    };
+    this._onMouseUp = () => {
+      this.dragging = false;
+    };
+    this._onLockChange = () => {
+      this.locked = document.pointerLockElement === this.canvas;
+      if (!this.locked && this.onLockLost) this.onLockLost();
+    };
+
+    window.addEventListener('keydown', this._onKeyDown);
+    window.addEventListener('keyup', this._onKeyUp);
+    window.addEventListener('mousemove', this._onMouseMove);
+    window.addEventListener('mousedown', this._onMouseDown);
+    window.addEventListener('mouseup', this._onMouseUp);
+    document.addEventListener('pointerlockchange', this._onLockChange);
+    window.addEventListener('blur', () => {
+      this.keys.clear();
+    });
+  }
+
+  requestLock() {
+    if (document.pointerLockElement === this.canvas) return;
+    const p = this.canvas.requestPointerLock?.();
+    if (p && p.catch) p.catch(() => {});
+  }
+
+  exitLock() {
+    if (document.pointerLockElement) document.exitPointerLock();
+  }
+
+  isDown(code) {
+    if (!this.enabled) return false;
+    return this.keys.has(code);
+  }
+
+  wasPressed(code) {
+    if (!this.enabled) return false;
+    return this.pressed.has(code);
+  }
+
+  get moveVector() {
+    let x = 0;
+    let z = 0;
+    if (this.isDown('KeyW') || this.isDown('ArrowUp')) z -= 1;
+    if (this.isDown('KeyS') || this.isDown('ArrowDown')) z += 1;
+    if (this.isDown('KeyA') || this.isDown('ArrowLeft')) x -= 1;
+    if (this.isDown('KeyD') || this.isDown('ArrowRight')) x += 1;
+    const len = Math.hypot(x, z) || 1;
+    return { x: x / len, z: z / len };
+  }
+
+  get isRunning() {
+    return this.isDown('ShiftLeft') || this.isDown('ShiftRight');
+  }
+
+  consumeMouse() {
+    const dx = this.mouseDx * 0.0022 * this.sensitivity;
+    const dy = this.mouseDy * 0.0022 * this.sensitivity;
+    this.mouseDx = 0;
+    this.mouseDy = 0;
+    return { dx, dy };
+  }
+
+  endFrame() {
+    this.pressed.clear();
+    this.mouseDx = 0;
+    this.mouseDy = 0;
+  }
+
+  clear() {
+    this.keys.clear();
+    this.pressed.clear();
+    this.mouseDx = 0;
+    this.mouseDy = 0;
+  }
+}

@@ -1,0 +1,615 @@
+import * as THREE from 'three';
+import { getGlowTexture } from '../world/Textures.js';
+import { clamp, rand, segmentBox } from '../core/utils.js';
+
+/**
+ * Vitals and the Restorer's two answers to the infected:
+ *
+ *  - a scavenged pistol, fed by ammo crates hidden along the routes;
+ *  - bare hands, which never run out.
+ *
+ * Left click fires when the pistol has rounds, otherwise it swings. Damage is
+ * survivable: health regenerates after a few seconds out of reach, and going
+ * down returns the player to the last checkpoint with nothing lost.
+ */
+
+const MAX_HEALTH = 100;
+const REGEN_DELAY = 7;
+const REGEN_RATE = 5;
+const INVULN = 0.55;
+const FIRE_RATE = 0.26;
+const PUNCH_RATE = 0.52;
+const BULLET_DAMAGE = 38;
+const PUNCH_DAMAGE = 24;
+const AMMO_MAX = 60;
+const AMMO_BOX = 10;
+const GUN_AMMO = 15;
+
+// gun caches: plaza, solar walkway and water station
+const GUNS = [
+  { id: 'gun_plaza', position: [4.5, 1.15, 26] },
+  { id: 'gun_solar', position: [37, 3.25, 0] },
+  { id: 'gun_water', position: [-56, 1.15, 0] },
+];
+
+// ammo along every route
+const AMMO = [
+  { id: 'ammo_plaza_w', position: [-8.5, 1.1, 13] },
+  { id: 'ammo_plaza_e', position: [13.5, 1.1, 9] },
+  { id: 'ammo_north', position: [0, 1.1, -36] },
+  { id: 'ammo_east', position: [30, 1.1, 3] },
+  { id: 'ammo_west', position: [-32, 1.1, -3] },
+  { id: 'ammo_solar', position: [46, 3.15, 0] },
+  { id: 'ammo_deck', position: [86, 4.2, 0] },
+  { id: 'ammo_south', position: [-4, 1.1, 52] },
+  { id: 'ammo_core', position: [0, 1.1, -66] },
+  { id: 'ammo_water', position: [-66, 1.1, 14] },
+];
+
+let sharedMats = null;
+function mats() {
+  if (sharedMats) return sharedMats;
+  sharedMats = {
+    gunBody: new THREE.MeshStandardMaterial({ color: 0x23282c, roughness: 0.42, metalness: 0.8 }),
+    gunGrip: new THREE.MeshStandardMaterial({ color: 0x2f2720, roughness: 0.85, metalness: 0.1 }),
+    gunTrim: new THREE.MeshStandardMaterial({
+      color: 0x1a1f22, emissive: 0xffb347, emissiveIntensity: 1.4, roughness: 0.4, metalness: 0.6,
+    }),
+    crate: new THREE.MeshStandardMaterial({ color: 0x3e4434, roughness: 0.8, metalness: 0.25 }),
+    crateLid: new THREE.MeshStandardMaterial({
+      color: 0x2a2e26, emissive: 0xffb347, emissiveIntensity: 0.9, roughness: 0.55, metalness: 0.3,
+    }),
+  };
+  return sharedMats;
+}
+
+/** A glowing world pickup: a pistol cache or an ammo crate. */
+class CombatPickup {
+  constructor({ scene, position, kind, color, onCollect, transient = false }) {
+    this.kind = kind;
+    this.color = color;
+    this.onCollect = onCollect;
+    this.transient = transient;
+    this.collected = false;
+    this.time = rand(0, 10);
+    this.phase = rand(0, Math.PI * 2);
+
+    this.group = new THREE.Group();
+    this.group.position.copy(position);
+    scene.add(this.group);
+    const M = mats();
+
+    if (kind === 'pistol') {
+      const slide = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.11, 0.44), M.gunBody);
+      this.group.add(slide);
+      const grip = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.2, 0.11), M.gunGrip);
+      grip.position.set(0, -0.12, 0.13);
+      grip.rotation.x = 0.3;
+      this.group.add(grip);
+      const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.026, 0.12, 8), M.gunBody);
+      barrel.rotation.x = Math.PI / 2;
+      barrel.position.set(0, 0.005, -0.27);
+      this.group.add(barrel);
+      const trim = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.02, 0.24), M.gunTrim);
+      trim.position.set(0.058, 0.03, 0);
+      this.group.add(trim);
+    } else {
+      const box = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.2, 0.24), M.crate);
+      this.group.add(box);
+      const lid = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.035, 0.26), M.crateLid);
+      lid.position.y = 0.11;
+      this.group.add(lid);
+      for (const x of [-0.09, 0.09]) {
+        const round = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.022, 0.17, 6), M.crateLid);
+        round.position.set(x, 0.17, 0);
+        this.group.add(round);
+      }
+    }
+
+    const halo = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: getGlowTexture(), color, transparent: true, opacity: 0.75,
+        blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false,
+      })
+    );
+    halo.scale.setScalar(kind === 'pistol' ? 2.1 : 1.5);
+    this.group.add(halo);
+    this.halo = halo;
+
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(kind === 'pistol' ? 0.5 : 0.34, 0.016, 6, 28),
+      new THREE.MeshBasicMaterial({
+        color, transparent: true, opacity: 0.6, blending: THREE.AdditiveBlending,
+        depthWrite: false, toneMapped: false,
+      })
+    );
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = -0.16;
+    this.group.add(ring);
+    this.ring = ring;
+
+    if (!transient) {
+      const beacon = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.02, 0.16, 2.4, 8, 1, true),
+        new THREE.MeshBasicMaterial({
+          color, transparent: true, opacity: 0.1, blending: THREE.AdditiveBlending,
+          depthWrite: false, side: THREE.DoubleSide, toneMapped: false,
+        })
+      );
+      beacon.position.y = 1.1;
+      this.group.add(beacon);
+      this.beacon = beacon;
+    }
+
+    // Only the pistol caches carry a real light; ammo crates rely on their
+    // emissive trim and halo so the scene's light count stays sane.
+    if (kind === 'pistol') {
+      this.light = new THREE.PointLight(color, 2.4, 6, 2);
+      this.group.add(this.light);
+    }
+    this.baseY = position.y;
+  }
+
+  collect(silent = false) {
+    if (this.collected) return false;
+    this.collected = true;
+    this.group.visible = false;
+    if (!silent && this.onCollect) this.onCollect(this);
+    return true;
+  }
+
+  setCollected(collected) {
+    this.collected = collected;
+    this.group.visible = !collected;
+  }
+
+  dispose() {
+    this.group.parent && this.group.parent.remove(this.group);
+    this.group.traverse((o) => {
+      if (o.isMesh) o.geometry.dispose();
+    });
+  }
+
+  update(dt, playerPos) {
+    if (this.collected) return;
+    this.time += dt;
+    this.group.position.y = this.baseY + Math.sin(this.time * 1.9 + this.phase) * 0.1;
+    this.group.rotation.y += dt * (this.kind === 'pistol' ? 0.9 : 0.6);
+    this.ring.rotation.z += dt * 0.8;
+    this.ring.scale.setScalar(1 + Math.sin(this.time * 2.4) * 0.08);
+    this.halo.material.opacity = 0.55 + Math.sin(this.time * 2.8) * 0.2;
+    if (this.light) this.light.intensity = 2.4 * (0.8 + Math.sin(this.time * 3.1) * 0.2);
+    const d = Math.hypot(playerPos.x - this.group.position.x, playerPos.z - this.group.position.z);
+    if (d < 1.9 && Math.abs(playerPos.y + 0.9 - this.group.position.y) < 2.4) this.collect();
+  }
+}
+
+export class Combat {
+  constructor({ scene, camera, colliders, player, ui, audio, vfx, shake, zombies }) {
+    this.scene = scene;
+    this.camera = camera;
+    this.colliders = colliders;
+    this.player = player;
+    this.ui = ui;
+    this.audio = audio;
+    this.vfx = vfx;
+    this.shake = shake;
+    this.zombies = zombies;
+    this.onDeath = null;
+
+    this.maxHealth = MAX_HEALTH;
+    this.health = MAX_HEALTH;
+    this.alive = true;
+    this.hasGun = false;
+    this.ammo = 0;
+    this.attackCd = 0;
+    this.hurtCd = 0;
+    this.regenTimer = 0;
+    this.emptyWarned = false;
+    this.time = 0;
+    this.downTime = 0;
+
+    this.raycaster = new THREE.Raycaster();
+    this.raycaster.far = 70;
+    this.center = new THREE.Vector2(0, 0);
+    this.tracers = [];
+    this.drops = [];
+    this.pickups = [];
+    this._lastHud = {};
+
+    this.muzzle = new THREE.PointLight(0xffd9a0, 0, 7, 2);
+    scene.add(this.muzzle);
+
+    this._buildPickups();
+    this._syncHud(true);
+  }
+
+  _buildPickups() {
+    for (const def of GUNS) {
+      const p = new CombatPickup({
+        scene: this.scene,
+        position: new THREE.Vector3(...def.position),
+        kind: 'pistol',
+        color: 0xffb347,
+        onCollect: () => this._onGunFound(),
+      });
+      p.id = def.id;
+      this.pickups.push(p);
+    }
+    for (const def of AMMO) {
+      const p = new CombatPickup({
+        scene: this.scene,
+        position: new THREE.Vector3(...def.position),
+        kind: 'ammo',
+        color: 0xffd08a,
+        onCollect: () => this._onAmmoFound(),
+      });
+      p.id = def.id;
+      this.pickups.push(p);
+    }
+  }
+
+  setZombies(zombies) {
+    this.zombies = zombies;
+  }
+
+  /** Full reset for a new run. */
+  reset() {
+    this.health = MAX_HEALTH;
+    this.alive = true;
+    this.hasGun = false;
+    this.ammo = 0;
+    this.attackCd = 0;
+    this.hurtCd = 0;
+    this.regenTimer = 0;
+    this.downTime = 0;
+    this.emptyWarned = false;
+    for (const p of this.pickups) p.setCollected(false);
+    for (const d of this.drops) d.dispose();
+    this.drops.length = 0;
+    this._clearTracers();
+    this.ui.setWeapon('FISTS', null);
+    this.ui.setReticle(false);
+    this._syncHud(true);
+  }
+
+  restore(data) {
+    this.reset();
+    if (!data) return;
+    this.health = clamp(data.health ?? MAX_HEALTH, 1, MAX_HEALTH);
+    this.alive = true;
+    this.hasGun = !!data.hasGun;
+    this.ammo = clamp(data.ammo || 0, 0, AMMO_MAX);
+    const taken = new Set(data.taken || []);
+    for (const p of this.pickups) {
+      if (taken.has(p.id)) p.setCollected(true);
+    }
+    this.ui.setWeapon(this.hasGun ? 'PISTOL' : 'FISTS', this.hasGun ? this.ammo : null);
+    this.ui.setReticle(this.hasGun);
+    this._syncHud(true);
+  }
+
+  toJSON() {
+    return {
+      health: Math.round(this.health),
+      hasGun: this.hasGun,
+      ammo: this.ammo,
+      taken: this.pickups.filter((p) => p.collected).map((p) => p.id),
+    };
+  }
+
+  giveGun(ammo = GUN_AMMO) {
+    this.hasGun = true;
+    this.ammo = clamp(this.ammo + ammo, 0, AMMO_MAX);
+    this.ui.setWeapon('PISTOL', this.ammo);
+    this.ui.setReticle(true);
+    this._syncHud(true);
+  }
+
+  heal(amount) {
+    this.health = clamp(this.health + amount, 0, MAX_HEALTH);
+    this._syncHud(true);
+  }
+
+  revive() {
+    this.health = MAX_HEALTH;
+    this.alive = true;
+    this.hurtCd = 0;
+    this.regenTimer = 0;
+    this.downTime = 0;
+    this._syncHud(true);
+  }
+
+  _onGunFound() {
+    const first = !this.hasGun;
+    this.giveGun(GUN_AMMO);
+    this.audio.sfx('gunPickup');
+    this.vfx.fountain(this.player.position.clone().setY(this.player.position.y + 1), {
+      count: 26, color: 0xffd08a, speed: 4.5, life: 1.2, size: 0.32,
+    });
+    this.ui.toast(first ? `PISTOL FOUND — LEFT CLICK TO FIRE (${GUN_AMMO})` : `PISTOL +${GUN_AMMO} AMMO`, 'cyan');
+  }
+
+  _onAmmoFound() {
+    this.ammo = clamp(this.ammo + AMMO_BOX, 0, AMMO_MAX);
+    this.emptyWarned = false;
+    this.audio.sfx('ammoPickup');
+    this.vfx.burst(this.player.position.clone().setY(this.player.position.y + 1.1), {
+      count: 16, color: 0xffd08a, speed: 2.6, life: 0.8, size: 0.26, gravity: -3,
+    });
+    this.ui.toast(`AMMO +${AMMO_BOX} — ${this.ammo}/${AMMO_MAX}`);
+    this._syncHud(true);
+  }
+
+  dropAmmo(position) {
+    if (this.drops.length >= 5) {
+      const old = this.drops.shift();
+      old.dispose();
+    }
+    const drop = new CombatPickup({
+      scene: this.scene,
+      position: new THREE.Vector3(position.x, position.y + 0.9, position.z),
+      kind: 'ammo',
+      color: 0xffd08a,
+      transient: true,
+      onCollect: () => {
+        this.ammo = clamp(this.ammo + 6, 0, AMMO_MAX);
+        this.emptyWarned = false;
+        this.audio.sfx('ammoPickup');
+        this.ui.toast(`AMMO +6 — ${this.ammo}/${AMMO_MAX}`);
+        this._syncHud(true);
+      },
+    });
+    drop.life = 45;
+    this.drops.push(drop);
+  }
+
+  attack() {
+    if (!this.alive || this.attackCd > 0) return;
+    if (this.hasGun && this.ammo > 0) {
+      this.shoot();
+      return;
+    }
+    if (this.hasGun && !this.emptyWarned) {
+      this.emptyWarned = true;
+      this.audio.sfx('empty');
+      this.ui.toast('OUT OF AMMO — FIGHT WITH YOUR HANDS', 'red');
+    }
+    this.punch();
+  }
+
+  _muzzlePosition() {
+    const p = this.player.position;
+    const f = this.player.facing;
+    return new THREE.Vector3(
+      p.x + Math.sin(f) * 0.55 + Math.cos(f) * 0.22,
+      p.y + 1.4,
+      p.z + Math.cos(f) * 0.55 - Math.sin(f) * 0.22
+    );
+  }
+
+  shoot() {
+    this.attackCd = FIRE_RATE;
+    this.ammo--;
+    this.audio.sfx('pistol');
+    this.shake.add(0.07);
+    this.ui.setWeapon('PISTOL', this.ammo);
+    this.ui.setReticle(true);
+
+    const from = this._muzzlePosition();
+    this.muzzle.position.copy(from);
+    this.muzzle.intensity = 9;
+    this.vfx.burst(from, {
+      count: 4, color: 0xffd9a0, speed: 4, life: 0.18, size: 0.24, gravity: 0, up: 0.4,
+    });
+
+    this.raycaster.setFromCamera(this.center, this.camera);
+    const targets = this.zombies ? this.zombies.targets() : [];
+    const hits = targets.length ? this.raycaster.intersectObjects(targets, false) : [];
+    let hit = null;
+    for (const h of hits) {
+      const z = h.object.userData.zombie;
+      if (!z || z.dead) continue;
+      if (this._rayBlocked(this.camera.position, h.point)) continue;
+      hit = { zombie: z, point: h.point };
+      break;
+    }
+    // Third-person camera sits above and behind the shoulder, so the exact
+    // centre ray can slip under a close target. Nudge shots onto whatever is
+    // under the crosshair, which is what the player is actually pointing at.
+    if (!hit) hit = this._aimTarget();
+
+    if (hit) {
+      const dir = hit.point.clone().sub(from).setY(0).normalize();
+      const killed = hit.zombie.hurt(BULLET_DAMAGE, dir.x, dir.z);
+      this.ui.hitMarker();
+      this.vfx.burst(hit.point, {
+        count: 10, color: killed ? 0x8a2a1e : 0x6a1f1f, speed: 3, life: 0.6, size: 0.26, gravity: -7, up: 0.6,
+      });
+      this.ui.toast(killed ? 'INFECTED DOWN' : 'INFECTED HIT', killed ? 'cyan' : '');
+      this._tracer(from, hit.point);
+    } else {
+      // no target: send the tracer into the world and kick up dust
+      const dir = new THREE.Vector3();
+      this.camera.getWorldDirection(dir);
+      const end = this.camera.position.clone().addScaledVector(dir, 40);
+      this._tracer(from, end);
+      this.vfx.burst(end, {
+        count: 5, color: 0xcfc2a8, speed: 1.8, life: 0.5, size: 0.22, gravity: -3,
+      });
+    }
+
+    if (this.ammo <= 0) {
+      this.emptyWarned = true;
+      this.ui.toast('MAGAZINE EMPTY — LEFT CLICK TO PUNCH', 'red');
+      this.ui.setWeapon('FISTS', null);
+      this.ui.setReticle(false);
+    }
+    this._syncHud(true);
+  }
+
+  punch() {
+    this.attackCd = PUNCH_RATE;
+    this.audio.sfx('punch');
+    this.shake.add(0.03);
+    const p = this.player.position;
+    const f = this.player.facing;
+    const fx = Math.sin(f);
+    const fz = Math.cos(f);
+    const target = this.zombies ? this.zombies.nearest(p, 2.6) : null;
+    let connected = false;
+    if (target) {
+      const dx = target.position.x - p.x;
+      const dz = target.position.z - p.z;
+      const d = Math.hypot(dx, dz) || 1;
+      const dot = (dx / d) * fx + (dz / d) * fz;
+      if (dot > 0.15 && Math.abs(target.position.y - p.y) < 1.6) {
+        const killed = target.hurt(PUNCH_DAMAGE, dx / d, dz / d);
+        this.ui.hitMarker();
+        this.vfx.burst(new THREE.Vector3(target.position.x, target.position.y + 1.2, target.position.z), {
+          count: 10, color: killed ? 0x8a2a1e : 0x6a1f1f, speed: 2.6, life: 0.6, size: 0.26, gravity: -6, up: 0.6,
+        });
+        this.ui.toast(killed ? 'INFECTED DOWN' : 'HAND HIT', killed ? 'cyan' : '');
+        connected = true;
+      }
+    }
+    if (!connected) {
+      this.vfx.burst(new THREE.Vector3(p.x + fx * 1.1, p.y + 1.25, p.z + fz * 1.1), {
+        count: 5, color: 0xbfb4a0, speed: 1.2, life: 0.35, size: 0.18, gravity: 1,
+      });
+    }
+  }
+
+  _aimTarget() {
+    if (!this.zombies) return null;
+    const cam = this.camera;
+    const forward = new THREE.Vector3();
+    cam.getWorldDirection(forward);
+    const chest = new THREE.Vector3();
+    const ndc = new THREE.Vector3();
+    const dir = new THREE.Vector3();
+    let best = null;
+    let bestScore = 0.27;
+    for (const z of this.zombies.zombies) {
+      if (z.dead || !z.group.visible) continue;
+      chest.copy(z.position).setY(z.position.y + 1.15);
+      const distance = cam.position.distanceTo(chest);
+      if (distance > 45) continue;
+      ndc.copy(chest).project(cam);
+      if (ndc.z > 1 || ndc.z < -1) continue;
+      dir.copy(chest).sub(cam.position).normalize();
+      if (dir.dot(forward) < 0.2) continue;
+      const score = Math.hypot(ndc.x, ndc.y * 1.1);
+      if (score > bestScore) continue;
+      if (this._rayBlocked(cam.position, chest)) continue;
+      bestScore = score;
+      best = { zombie: z, point: chest.clone() };
+    }
+    return best;
+  }
+
+  _tracer(from, to) {
+    const mesh = this.vfx.beam(from, to, { color: 0xfff2c8, radius: 0.014, opacity: 0.8, pulse: false });
+    this.tracers.push({ mesh, life: 0.07 });
+  }
+
+  _clearTracers() {
+    for (const t of this.tracers) this.vfx.remove(t.mesh);
+    this.tracers.length = 0;
+  }
+
+  _rayBlocked(from, to) {
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const dz = to.z - from.z;
+    for (const b of this.colliders.boxes) {
+      if (!b.cast) continue;
+      const t = segmentBox(from.x, from.y, from.z, dx, dy, dz, b, 0.985);
+      if (t < 0.985) return true;
+    }
+    return false;
+  }
+
+  hurt(amount, source) {
+    if (!this.alive || this.hurtCd > 0 || amount <= 0) return;
+    this.health = Math.max(0, this.health - amount);
+    this.hurtCd = INVULN;
+    this.regenTimer = 0;
+    this.ui.flashDamage();
+    this.ui.setHealth(this.health, this.maxHealth);
+    this.audio.sfx('hurt');
+    this.shake.add(0.16);
+
+    if (source) {
+      const dx = this.player.position.x - source.position.x;
+      const dz = this.player.position.z - source.position.z;
+      const d = Math.hypot(dx, dz) || 1;
+      this.player.knockback(dx / d, dz / d, 3.4);
+    }
+
+    if (this.health <= 0) {
+      this.alive = false;
+      this.hurtCd = 0;
+      this.ui.setWeapon('FISTS', null);
+      this.ui.setReticle(false);
+      if (this.onDeath) this.onDeath();
+    }
+  }
+
+  update(dt) {
+    this.time += dt;
+    this.attackCd = Math.max(0, this.attackCd - dt);
+    this.hurtCd = Math.max(0, this.hurtCd - dt);
+    this.regenTimer += dt;
+
+    if (this.alive && this.health < this.maxHealth && this.regenTimer > REGEN_DELAY) {
+      this.health = Math.min(this.maxHealth, this.health + REGEN_RATE * dt);
+      this.ui.setHealth(this.health, this.maxHealth);
+      this._syncHud();
+    }
+
+    this.muzzle.intensity = Math.max(0, this.muzzle.intensity - dt * 90);
+
+    for (let i = this.tracers.length - 1; i >= 0; i--) {
+      const t = this.tracers[i];
+      t.life -= dt;
+      t.mesh.material.opacity = Math.max(0, t.life / 0.07) * 0.8;
+      if (t.life <= 0) {
+        this.vfx.remove(t.mesh);
+        this.tracers.splice(i, 1);
+      }
+    }
+
+    for (const p of this.pickups) p.update(dt, this.player.position);
+    for (let i = this.drops.length - 1; i >= 0; i--) {
+      const d = this.drops[i];
+      d.update(dt, this.player.position);
+      d.life -= dt;
+      if (!d.collected && d.life < 6) {
+        d.group.visible = Math.floor(d.life * 4) % 2 === 0;
+      }
+      if (d.collected || d.life <= 0) {
+        d.dispose();
+        this.drops.splice(i, 1);
+      }
+    }
+
+    this._syncHud();
+  }
+
+  _syncHud(force = false) {
+    const hp = Math.round(this.health);
+    if (force || this._lastHud.health !== hp) {
+      this._lastHud.health = hp;
+      this.ui.setHealth(this.health, this.maxHealth);
+    }
+    const gun = this.hasGun && this.ammo > 0;
+    const ammo = gun ? this.ammo : null;
+    if (force || this._lastHud.gun !== gun || this._lastHud.ammo !== ammo) {
+      this._lastHud.gun = gun;
+      this._lastHud.ammo = ammo;
+      this.ui.setWeapon(gun ? 'PISTOL' : 'FISTS', ammo);
+      this.ui.setReticle(gun);
+    }
+  }
+}

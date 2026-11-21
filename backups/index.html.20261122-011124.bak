@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>RE:START — A Bounce Back Game</title>
+<link rel="stylesheet" href="./css/style.css" />
+</head>
+<body>
+<canvas id="game-canvas"></canvas>
+<div id="vignette"></div>
+<div id="letterbox" class="hidden"><div class="lb-top"></div><div class="lb-bottom"></div></div>
+
+<!-- ============ HUD ============ -->
+<div id="hud" class="hidden">
+  <div id="mission-panel">
+    <div class="mission-kicker">MISSION <span id="mission-index">01</span></div>
+    <div id="mission-title">Arrival Plaza</div>
+    <ul id="objective-list"></ul>
+  </div>
+
+  <div id="stats-panel">
+    <div class="stat"><span class="stat-icon energy">⚡</span><span id="stat-energy">0</span><span class="stat-sub" id="stat-energy-max">/ 9</span></div>
+    <div class="stat"><span class="stat-icon spark">✦</span><span id="stat-sparks">0</span><span class="stat-sub">INSIGHT</span></div>
+    <div id="vitals-panel">
+      <div class="health-row" id="health-row">
+        <span class="health-icon">✚</span>
+        <div class="health-bar"><i id="health-fill"></i></div>
+        <span id="health-num">100</span>
+      </div>
+      <div class="weapon-row">
+        <span id="weapon-name">FISTS</span>
+        <span id="ammo-count">—</span>
+      </div>
+    </div>
+  </div>
+
+  <div id="compass">
+    <div class="compass-ring"><span class="tick n">N</span><span class="tick e">E</span><span class="tick s">S</span><span class="tick w">W</span></div>
+    <div id="compass-needle"></div>
+    <div id="compass-distance">—</div>
+  </div>
+
+  <div id="reticle"></div>
+  <div id="hitmarker"></div>
+  <div id="damage-flash"></div>
+
+  <div id="death-screen" class="hidden">
+    <div class="death-card">
+      <div class="death-kicker">RESTORER DOWN</div>
+      <h2>BOUNCE <span>BACK</span></h2>
+      <p>The city is not done with you. The infected cannot take what you have already restored.</p>
+      <div class="death-line"></div>
+      <div class="death-hint">RETURNING TO YOUR LAST CHECKPOINT…</div>
+    </div>
+  </div>
+
+  <div id="interaction-prompt" class="hidden">
+    <span class="key-badge">E</span>
+    <span id="interaction-text">Interact</span>
+  </div>
+
+  <div id="relay-panel" class="hidden">
+    <div class="relay-avatar"><div class="relay-eye"></div></div>
+    <div class="relay-body">
+      <div class="relay-name">RELAY <span>// ASSISTANT DRONE</span></div>
+      <div id="relay-text"></div>
+    </div>
+  </div>
+
+  <div id="insight-panel" class="hidden">
+    <div class="insight-title">✦ INSIGHT SPARK READY</div>
+    <div class="insight-body">Press <b>H</b> — RELAY will share what the city taught it.</div>
+  </div>
+
+  <div id="insight-active" class="hidden">
+    <span>✦ INSIGHT SURGE</span><div class="surge-bar"><i id="surge-fill"></i></div>
+  </div>
+
+  <div id="toast-stack"></div>
+
+  <div id="objective-marker" class="hidden"><div class="marker-diamond"></div><div id="marker-label"></div></div>
+</div>
+
+<!-- ============ MAIN MENU ============ -->
+<div id="menu" class="screen">
+  <div class="menu-bg-glow"></div>
+  <div class="menu-grid"></div>
+  <div class="menu-inner">
+    <div class="brand">
+      <div class="brand-line"><span></span> THE CITY OF ASTER <span></span></div>
+      <h1 class="game-title">RE<span class="colon">:</span>START</h1>
+      <div class="game-subtitle">HACKATHON EDITION · A BOUNCE BACK GAME</div>
+    </div>
+    <div class="menu-copy">
+      Aster has gone dark.<br />You are the Restorer. Bring the signal back.
+    </div>
+    <div class="menu-buttons">
+      <button id="btn-new" class="btn primary">NEW GAME</button>
+      <button id="btn-continue" class="btn" disabled>CONTINUE</button>
+      <button id="btn-settings" class="btn ghost">SETTINGS</button>
+      <button id="btn-controls" class="btn ghost">CONTROLS</button>
+    </div>
+    <div class="menu-footer">
+      <span>WASD MOVE</span><span>LEFT CLICK ATTACK</span><span>SPACE JUMP</span><span>SHIFT RUN</span><span>E INTERACT</span><span>H INSIGHT</span><span>ESC PAUSE</span>
+    </div>
+  </div>
+  <div class="menu-credit">A playable 3D adventure · built with three.js · free &amp; open assets</div>
+</div>
+
+<!-- ============ SETTINGS / CONTROLS ============ -->
+<div id="settings" class="screen modal-screen hidden">
+  <div class="modal">
+    <h2 id="settings-title">SETTINGS</h2>
+    <div id="settings-body">
+      <div class="setting-row">
+        <label for="set-master">Master Volume</label>
+        <input id="set-master" type="range" min="0" max="1" step="0.01" value="0.8" />
+        <span class="setting-val" id="set-master-val">80%</span>
+      </div>
+      <div class="setting-row">
+        <label for="set-music">Music Volume</label>
+        <input id="set-music" type="range" min="0" max="1" step="0.01" value="0.55" />
+        <span class="setting-val" id="set-music-val">55%</span>
+      </div>
+      <div class="setting-row">
+        <label for="set-sens">Mouse Sensitivity</label>
+        <input id="set-sens" type="range" min="0.3" max="2.5" step="0.05" value="1" />
+        <span class="setting-val" id="set-sens-val">1.0</span>
+      </div>
+      <div class="setting-row">
+        <label for="set-quality">Graphics Quality</label>
+        <select id="set-quality">
+          <option value="low">Low (performance)</option>
+          <option value="medium">Medium</option>
+          <option value="high" selected>High (cinematic)</option>
+        </select>
+      </div>
+      <div class="setting-row">
+        <label for="set-bloom">Bloom / Glow</label>
+        <input id="set-bloom" type="checkbox" checked />
+      </div>
+      <div id="controls-list" class="hidden">
+        <div class="control-row"><span>Move</span><b>W A S D</b></div>
+        <div class="control-row"><span>Look</span><b>MOUSE</b></div>
+        <div class="control-row"><span>Run</span><b>SHIFT</b></div>
+        <div class="control-row"><span>Jump</span><b>SPACE</b></div>
+        <div class="control-row"><span>Shoot / Punch</span><b>LEFT CLICK</b></div>
+        <div class="control-row"><span>Interact</span><b>E</b></div>
+        <div class="control-row"><span>Insight Spark</span><b>H</b></div>
+        <div class="control-row"><span>Pause</span><b>ESC</b></div>
+        <div class="control-row"><span>Fullscreen</span><b>F</b></div>
+      </div>
+    </div>
+    <div class="modal-buttons">
+      <button id="btn-settings-close" class="btn primary">CLOSE</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ PAUSE ============ -->
+<div id="pause" class="screen modal-screen hidden">
+  <div class="modal pause-modal">
+    <div class="pause-kicker">SIMULATION PAUSED</div>
+    <h2>RE:START</h2>
+    <div class="pause-stats" id="pause-stats"></div>
+    <div class="modal-buttons column">
+      <button id="btn-resume" class="btn primary">RESUME</button>
+      <button id="btn-pause-settings" class="btn ghost">SETTINGS</button>
+      <button id="btn-checkpoint" class="btn ghost">RESTART AT CHECKPOINT</button>
+      <button id="btn-menu" class="btn danger">SAVE &amp; MAIN MENU</button>
+    </div>
+    <div class="pause-hint">Your progress is saved automatically at every checkpoint.</div>
+  </div>
+</div>
+
+<!-- ============ MISSION COMPLETE ============ -->
+<div id="mission-screen" class="screen modal-screen hidden">
+  <div class="mission-complete-card">
+    <div class="mc-kicker">MISSION COMPLETE</div>
+    <h2 id="mc-title">Arrival Plaza</h2>
+    <p id="mc-copy">The plaza breathes again.</p>
+    <div class="mc-line"></div>
+    <button id="btn-mc-continue" class="btn primary">CONTINUE</button>
+  </div>
+</div>
+
+<!-- ============ ENDING ============ -->
+<div id="ending" class="screen hidden">
+  <div class="ending-inner">
+    <div class="ending-kicker">THE DISTRICT IS ALIVE</div>
+    <h1 class="ending-title">BOUNCE<span>BACK</span></h1>
+    <p class="ending-copy">Aster remembers what it was. And you remember what you learned.</p>
+    <div class="ending-stats" id="ending-stats"></div>
+    <div class="modal-buttons">
+      <button id="btn-ending-menu" class="btn primary">RETURN TO MENU</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ LOADING ============ -->
+<div id="loading" class="screen">
+  <div class="loading-inner">
+    <div class="loading-logo">RE<span>:</span>START</div>
+    <div class="loading-bar"><i id="loading-fill"></i></div>
+    <div id="loading-text">INITIALIZING RESTORATION PROTOCOL…</div>
+    <div class="loading-tip">Tip: When you get stuck, RELAY offers an Insight Spark. It never takes your progress away.</div>
+  </div>
+</div>
+
+<div id="fade"></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three.module.js",
+    "three/addons/": "./vendor/"
+  }
+}
+</script>
+<script type="module" src="./js/main.js"></script>
+</body>
+</html>

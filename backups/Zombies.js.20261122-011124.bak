@@ -1,0 +1,558 @@
+import * as THREE from 'three';
+import { angleLerp, clamp, rand } from '../core/utils.js';
+
+/**
+ * The infected of Aster.
+ *
+ * They shamble through the ruins, drift toward movement and claw at anything
+ * that still breathes. They are a distraction while restoring a district, not a
+ * gate: they can be outrun, shot, or beaten down with bare hands.
+ *
+ * Every zombie is procedural geometry built from a handful of boxes, with a
+ * per-zombie material set so hits can flash individually.
+ */
+
+const MAX_ALIVE = 10;
+const ROSTER = 12;
+
+const SKINS = [0x8b9778, 0x7f8d74, 0x939a80, 0x78866c];
+const SHIRTS = [0x55494a, 0x424c47, 0x5d4c3c, 0x3a4148, 0x4e5242];
+const PANTS = [0x2c3236, 0x33373a, 0x3a3530];
+
+// Anchors spread over the plaza edges, four streets, both side districts and
+// the core approach. Spawns keep their distance from the player.
+const SPOTS = [
+  [-18, 18], [17, 15], [-12, -9], [9, -16],
+  [-9, -30], [8, -44], [-30, 4], [26, 5],
+  [-46, -5], [52, -4], [4, 42], [-8, 55],
+  [1, 66], [-18, 86], [-64, 12], [-80, -6],
+  [82, -16], [92, 9], [7, -66], [-8, -78],
+];
+
+let GEO = null;
+let EYE_MAT = null;
+
+function geometry() {
+  if (GEO) return GEO;
+  GEO = {
+    torso: new THREE.BoxGeometry(0.52, 0.62, 0.28),
+    head: new THREE.BoxGeometry(0.26, 0.28, 0.24),
+    jaw: new THREE.BoxGeometry(0.19, 0.06, 0.2),
+    arm: new THREE.BoxGeometry(0.13, 0.58, 0.14),
+    leg: new THREE.BoxGeometry(0.17, 0.78, 0.18),
+    eye: new THREE.SphereGeometry(0.026, 6, 5),
+    rag: new THREE.BoxGeometry(0.3, 0.14, 0.03),
+  };
+  EYE_MAT = new THREE.MeshBasicMaterial({ color: 0xb6ff8f, toneMapped: false });
+  return GEO;
+}
+
+class Zombie {
+  constructor(system, spot, index) {
+    this.system = system;
+    this.audio = system.audio;
+    this.index = index;
+    this.home = new THREE.Vector3(spot[0], 0, spot[1]);
+    this.position = new THREE.Vector3();
+    this.maxHealth = 100;
+    this.health = 100;
+    this.speed = rand(1.45, 2.15);
+    this.damage = 11;
+    this.dead = false;
+    this.deathT = 0;
+    this.respawnAt = 0;
+    this.stun = 0;
+    this.flash = 0;
+    this.winding = false;
+    this.windT = 0;
+    this.attackCd = 0;
+    this.kvx = 0;
+    this.kvz = 0;
+    this.vy = 0;
+    this.t = rand(0, 6);
+    this.growlTimer = rand(2, 8);
+    this.facing = rand(-Math.PI, Math.PI);
+    this.yawTarget = this.facing;
+    this.wander = new THREE.Vector2(this.home.x, this.home.z);
+    this.wanderTimer = 0;
+    this.hitMeshes = [];
+
+    this._build();
+    this.respawn(true);
+  }
+
+  _build() {
+    const g = geometry();
+    const skinMat = new THREE.MeshStandardMaterial({
+      color: SKINS[this.index % SKINS.length], roughness: 0.92, metalness: 0.02, flatShading: true,
+    });
+    const shirtMat = new THREE.MeshStandardMaterial({
+      color: SHIRTS[this.index % SHIRTS.length], roughness: 0.95, metalness: 0.02, flatShading: true,
+    });
+    const pantMat = new THREE.MeshStandardMaterial({
+      color: PANTS[this.index % PANTS.length], roughness: 0.96, metalness: 0.02, flatShading: true,
+    });
+    this.skinMat = skinMat;
+    this.shirtMat = shirtMat;
+
+    const root = new THREE.Group();
+    root.rotation.order = 'YXZ';
+    const body = new THREE.Group();
+    root.add(body);
+    this.root = root;
+    this.body = body;
+
+    const torso = new THREE.Mesh(g.torso, shirtMat);
+    torso.position.y = 1.22;
+    torso.castShadow = true;
+    body.add(torso);
+    this.hitMeshes.push(torso);
+
+    const head = new THREE.Mesh(g.head, skinMat);
+    head.position.y = 1.66;
+    head.castShadow = true;
+    body.add(head);
+    this.hitMeshes.push(head);
+    this.head = head;
+
+    const jaw = new THREE.Mesh(g.jaw, skinMat);
+    jaw.position.set(0, -0.135, 0.06);
+    head.add(jaw);
+    this.jaw = jaw;
+
+    for (const side of [-1, 1]) {
+      const eye = new THREE.Mesh(g.eye, EYE_MAT);
+      eye.position.set(side * 0.058, 0.045, 0.122);
+      head.add(eye);
+    }
+
+    // torn shirt flap hanging off the waist
+    const rag = new THREE.Mesh(g.rag, shirtMat);
+    rag.position.set(0.12, 0.86, 0.13);
+    rag.rotation.z = 0.5;
+    body.add(rag);
+
+    const limbs = {};
+    for (const side of [-1, 1]) {
+      const key = side < 0 ? 'L' : 'R';
+      const arm = new THREE.Group();
+      arm.position.set(side * 0.33, 1.44, 0);
+      const armMesh = new THREE.Mesh(g.arm, shirtMat);
+      armMesh.position.y = -0.29;
+      armMesh.castShadow = true;
+      arm.add(armMesh);
+      const hand = new THREE.Mesh(g.jaw, skinMat);
+      hand.position.y = -0.6;
+      hand.scale.set(0.8, 1.2, 0.8);
+      arm.add(hand);
+      body.add(arm);
+      limbs['arm' + key] = arm;
+      this.hitMeshes.push(armMesh);
+
+      const leg = new THREE.Group();
+      leg.position.set(side * 0.14, 0.8, 0);
+      const legMesh = new THREE.Mesh(g.leg, pantMat);
+      legMesh.position.y = -0.36;
+      legMesh.castShadow = true;
+      leg.add(legMesh);
+      body.add(leg);
+      limbs['leg' + key] = leg;
+      this.hitMeshes.push(legMesh);
+    }
+    this.armL = limbs.armL;
+    this.armR = limbs.armR;
+    this.legL = limbs.legL;
+    this.legR = limbs.legR;
+
+    for (const m of this.hitMeshes) m.userData.zombie = this;
+
+    this.system.group.add(root);
+    this.group = root;
+  }
+
+  respawn(instant = false) {
+    const system = this.system;
+    let spot = null;
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const a = rand(0, Math.PI * 2);
+      const r = attempt === 0 ? 0 : rand(1.5, 6);
+      const x = this.home.x + Math.cos(a) * r;
+      const z = this.home.z + Math.sin(a) * r;
+      const y = system.groundY(x, z, 6);
+      if (y === null) continue;
+      if (system.blocked(x, z, y, 0.36)) continue;
+      if (!instant && system.player && system.player.position.distanceToSquared(new THREE.Vector3(x, y, z)) < 16 * 16) continue;
+      spot = { x, y, z };
+      break;
+    }
+    if (!spot) {
+      spot = { x: this.home.x, y: system.groundY(this.home.x, this.home.z, 6) ?? 0, z: this.home.z };
+    }
+    this.position.set(spot.x, spot.y, spot.z);
+    this.group.position.copy(this.position);
+    this.health = this.maxHealth;
+    this.dead = false;
+    this.deathT = 0;
+    this.stun = 0;
+    this.flash = 0;
+    this.winding = false;
+    this.windT = 0;
+    this.attackCd = rand(0, 0.6);
+    this.kvx = this.kvz = this.vy = 0;
+    this.wanderTimer = rand(1, 5);
+    this.wander.set(this.position.x + rand(-5, 5), this.position.z + rand(-5, 5));
+    this.facing = rand(-Math.PI, Math.PI);
+    this.yawTarget = this.facing;
+    this.group.rotation.set(0, this.facing, 0);
+    this.group.visible = true;
+    this.body.position.set(0, 0, 0);
+    this.body.rotation.set(0, 0, 0);
+    this.body.scale.setScalar(1);
+    this.jaw.rotation.x = -0.15;
+  }
+
+  hurt(amount, dirX = 0, dirZ = 0) {
+    if (this.dead) return false;
+    this.health -= amount;
+    this.flash = 0.2;
+    this.stun = Math.max(this.stun, 0.22);
+    this.kvx += dirX * 3.2;
+    this.kvz += dirZ * 3.2;
+    if (this.health <= 0) {
+      this.health = 0;
+      this.dead = true;
+      this.deathT = 0;
+      this.winding = false;
+      this.respawnAt = this.system.time + rand(16, 26);
+      this.audio.sfx('zombieDie');
+      this.system.vfx.burst(this.position.clone().setY(this.position.y + 1.1), {
+        count: 22, color: 0x5c1d18, speed: 3.2, life: 1.1, size: 0.34, gravity: -8, up: 0.7,
+      });
+      this.system.vfx.ring(this.position.clone().setY(this.position.y + 0.08), {
+        color: 0x7a2b1e, radius: 1.8, life: 0.8,
+      });
+      if (this.system.onKilled) this.system.onKilled(this);
+      return true;
+    }
+    this.audio.sfx('zombieHit');
+    this.system.vfx.burst(this.position.clone().setY(this.position.y + 1.15), {
+      count: 8, color: 0x6a1f1f, speed: 2.4, life: 0.7, size: 0.28, gravity: -7, up: 0.6,
+    });
+    return false;
+  }
+
+  _move(dt, vx, vz) {
+    const system = this.system;
+    const stepX = (vx + this.kvx) * dt;
+    const stepZ = (vz + this.kvz) * dt;
+    const nx = this.position.x + stepX;
+    if (!system.blocked(nx, this.position.z, this.position.y, 0.34)) this.position.x = nx;
+    const nz = this.position.z + stepZ;
+    if (!system.blocked(this.position.x, nz, this.position.y, 0.34)) this.position.z = nz;
+  }
+
+  update(dt, playerPos, playerAlive) {
+    const system = this.system;
+    this.t += dt;
+    const dx = playerPos.x - this.position.x;
+    const dz = playerPos.z - this.position.z;
+    const dist = Math.hypot(dx, dz);
+    const dy = playerPos.y - this.position.y;
+
+    if (this.dead) {
+      this.deathT += dt;
+      const k = clamp(this.deathT / 1.4, 0, 1);
+      this.group.rotation.x = -Math.PI / 2 * k * 0.92;
+      this.group.position.y = this.position.y + 0.28 * Math.sin(k * Math.PI * 0.5);
+      if (this.deathT > 1.5) {
+        this.group.position.y = this.position.y + 0.28 - (this.deathT - 1.5) * 1.1;
+      }
+      if (this.deathT > 2.5) this.group.visible = false;
+      if (system.time >= this.respawnAt) this.respawn(false);
+      return;
+    }
+
+    // ---- hit flash ----------------------------------------------------
+    if (this.flash > 0) {
+      this.flash = Math.max(0, this.flash - dt);
+      const k = this.flash / 0.2;
+      this.skinMat.emissive.setHex(0x8c2a1e);
+      this.skinMat.emissiveIntensity = k * 2.2;
+      this.shirtMat.emissive.setHex(0x5c1a12);
+      this.shirtMat.emissiveIntensity = k * 1.6;
+    } else if (this.skinMat.emissiveIntensity !== 0) {
+      this.skinMat.emissiveIntensity = 0;
+      this.shirtMat.emissiveIntensity = 0;
+    }
+
+    if (this.stun > 0) this.stun -= dt;
+    this.attackCd = Math.max(0, this.attackCd - dt);
+    const aware = playerAlive && dist < 24 && Math.abs(dy) < 4.6 && this.stun <= 0;
+
+    let vx = 0;
+    let vz = 0;
+    let moving = 0;
+
+    if (aware) {
+      if (dist > 1.35) {
+        vx = (dx / (dist || 1)) * this.speed;
+        vz = (dz / (dist || 1)) * this.speed;
+        moving = 1;
+      }
+      this.yawTarget = Math.atan2(dx, dz);
+
+      // growl to pull attention while the player works
+      this.growlTimer -= dt;
+      if (this.growlTimer <= 0 && dist < 22) {
+        this.growlTimer = rand(4, 9);
+        this.audio.sfx('zombieGrowl', { volume: clamp(1 - dist / 30, 0.15, 1) });
+      }
+
+      if (dist < 2.0 && Math.abs(dy) < 1.5 && this.attackCd <= 0 && !this.winding) {
+        this.winding = true;
+        this.windT = 0;
+      }
+    } else {
+      // idle shambling around the spawn anchor
+      this.wanderTimer -= dt;
+      if (this.wanderTimer <= 0) {
+        this.wanderTimer = rand(3, 7);
+        this.wander.set(this.position.x + rand(-6, 6), this.position.z + rand(-6, 6));
+        this.yawTarget = Math.atan2(this.wander.x - this.position.x, this.wander.y - this.position.z);
+      }
+      const wx = this.wander.x - this.position.x;
+      const wz = this.wander.y - this.position.z;
+      const wd = Math.hypot(wx, wz);
+      if (wd > 0.8) {
+        vx = (wx / wd) * 0.55;
+        vz = (wz / wd) * 0.55;
+        moving = 0.55;
+      }
+    }
+
+    // attack wind-up: lean in and swipe
+    if (this.winding) {
+      this.windT += dt;
+      if (this.windT > 0.42) {
+        this.winding = false;
+        this.attackCd = 1.25;
+        if (playerAlive && dist < 2.35 && Math.abs(dy) < 1.6) {
+          if (this.system.onAttackPlayer) this.system.onAttackPlayer(this.damage, this);
+          this.audio.sfx('zombieSwipe');
+        }
+      }
+    }
+
+    this._move(dt, vx, vz);
+    this.kvx *= Math.exp(-6 * dt);
+    this.kvz *= Math.exp(-6 * dt);
+
+    // vertical: settle onto the highest floor below the feet
+    const ground = system.groundY(this.position.x, this.position.z, this.position.y + 0.6, 0.7);
+    if (ground !== null && this.position.y <= ground + 0.05 && this.vy <= 0) {
+      this.position.y = ground;
+      this.vy = 0;
+    } else {
+      this.vy -= 24 * dt;
+      this.position.y = Math.max(-4, this.position.y + this.vy * dt);
+      if (ground !== null && this.position.y < ground) {
+        this.position.y = ground;
+        this.vy = 0;
+      }
+    }
+
+    this.facing = angleLerp(this.facing, this.yawTarget, 1 - Math.exp(-7 * dt));
+    this.group.position.copy(this.position);
+    this.group.rotation.y = this.facing;
+
+    // ---- procedural shamble -------------------------------------------
+    const gaitSpeed = moving > 0.8 ? this.speed * 2.55 : 3.1;
+    const gait = Math.sin(this.t * gaitSpeed);
+    const bob = Math.abs(Math.cos(this.t * gaitSpeed));
+    const swing = moving > 0.05 ? 0.5 : 0.12;
+    this.body.position.y = bob * 0.045 - 0.02;
+    this.body.rotation.z = Math.sin(this.t * 1.5) * 0.05 + gait * 0.02;
+    this.body.rotation.x = this.winding ? 0.22 : 0.05;
+    this.legL.rotation.x = gait * swing;
+    this.legR.rotation.x = -gait * swing;
+    this.head.rotation.z = 0.16 + Math.sin(this.t * 0.9) * 0.06;
+    this.head.rotation.y = Math.sin(this.t * 0.7) * 0.16;
+    this.jaw.rotation.x = -0.15 - Math.max(0, Math.sin(this.t * 2.4)) * 0.22;
+
+    const reach = -1.32;
+    const swipe = this.winding ? -1.75 - Math.sin(clamp(this.windT / 0.42, 0, 1) * Math.PI) * 0.25 : reach;
+    this.armL.rotation.x = swipe + gait * 0.14;
+    this.armR.rotation.x = swipe - gait * 0.14;
+    this.armL.rotation.z = -0.1 + Math.sin(this.t * 1.3) * 0.05;
+    this.armR.rotation.z = 0.1 - Math.sin(this.t * 1.3) * 0.05;
+  }
+}
+
+export class ZombieSystem {
+  constructor({ scene, colliders, player, audio, vfx, ui }) {
+    this.scene = scene;
+    this.colliders = colliders;
+    this.player = player;
+    this.audio = audio;
+    this.vfx = vfx;
+    this.ui = ui;
+    this.time = 0;
+    this.group = new THREE.Group();
+    this.group.name = 'infected';
+    scene.add(this.group);
+    this.onAttackPlayer = null;
+    this.onKilled = null;
+    this.zombies = [];
+
+    const roster = Math.min(ROSTER, Math.max(MAX_ALIVE, SPOTS.length));
+    for (let i = 0; i < roster; i++) {
+      this.zombies.push(new Zombie(this, SPOTS[i % SPOTS.length], i));
+    }
+    this.reset();
+  }
+
+  /** Highest floor at or below feetY + tolerance. */
+  groundY(x, z, from = 6, tolerance = 0.7) {
+    let best = null;
+    for (const b of this.colliders.query(x, z, 0.9)) {
+      if (x < b.minX - 0.05 || x > b.maxX + 0.05) continue;
+      if (z < b.minZ - 0.05 || z > b.maxZ + 0.05) continue;
+      const top = b.maxY;
+      if (top > from + tolerance) continue;
+      if (top < from - 6) continue;
+      if (best === null || top > best) best = top;
+    }
+    return best;
+  }
+
+  /** Is the capsule blocked at this spot? Used for spawns and movement. */
+  blocked(x, z, y, radius = 0.34) {
+    for (const b of this.colliders.query(x, z, 1.0)) {
+      if (b.isGround) continue;
+      if (b.maxY <= y + 0.45) continue; // low enough to step onto
+      if (b.minY >= y + 1.7) continue; // overhead
+      if (x + radius <= b.minX || x - radius >= b.maxX) continue;
+      if (z + radius <= b.minZ || z - radius >= b.maxZ) continue;
+      return true;
+    }
+    return false;
+  }
+
+  reset() {
+    this.time = 0;
+    const player = this.player;
+    for (const z of this.zombies) {
+      z.respawnAt = 0;
+      z.respawn(true);
+      // Keep the opening plaza readable: nothing within 18 m of the spawn.
+      if (player && Math.hypot(z.position.x - player.position.x, z.position.z - player.position.z) < 18) {
+        z.group.visible = false;
+        z.position.y = -6;
+        z.dead = true;
+        z.deathT = 3;
+        z.respawnAt = this.time + rand(4, 12);
+      }
+    }
+  }
+
+  targets() {
+    const out = [];
+    for (const z of this.zombies) {
+      if (z.dead || !z.group.visible) continue;
+      for (const m of z.hitMeshes) out.push(m);
+    }
+    return out;
+  }
+
+  /** Push the horde out of a checkpoint so a respawn is not an instant death. */
+  scatter(center, radius = 14) {
+    for (const z of this.zombies) {
+      if (z.dead || !z.group.visible) continue;
+      const dx = z.position.x - center.x;
+      const dz = z.position.z - center.z;
+      const d = Math.hypot(dx, dz);
+      if (d > radius) continue;
+      const a = d < 0.01 ? rand(0, Math.PI * 2) : Math.atan2(dz, dx);
+      const nx = center.x + Math.cos(a) * (radius + 2);
+      const nz = center.z + Math.sin(a) * (radius + 2);
+      const y = this.groundY(nx, nz, center.y + 2);
+      if (y === null) {
+        z.group.visible = false;
+        z.dead = true;
+        z.deathT = 3;
+        z.respawnAt = this.time + rand(6, 12);
+        continue;
+      }
+      z.position.set(nx, y, nz);
+      z.group.position.copy(z.position);
+    }
+  }
+
+  nearest(pos, radius = 60) {
+    let best = null;
+    let bestD = radius;
+    for (const z of this.zombies) {
+      if (z.dead || !z.group.visible) continue;
+      const d = Math.hypot(z.position.x - pos.x, z.position.z - pos.z);
+      if (d < bestD) {
+        bestD = d;
+        best = z;
+      }
+    }
+    return best;
+  }
+
+  stats() {
+    return {
+      total: this.zombies.length,
+      alive: this.zombies.filter((z) => !z.dead && z.group.visible).length,
+      dead: this.zombies.filter((z) => z.dead).length,
+      health: this.zombies.map((z) => Math.round(z.health)),
+    };
+  }
+
+  update(dt, playerPos, playerAlive = true) {
+    this.time += dt;
+    for (const z of this.zombies) z.update(dt, playerPos, playerAlive);
+    // Never let the horde stand inside the player (or the camera).
+    for (const z of this.zombies) {
+      if (z.dead || !z.group.visible) continue;
+      const dx = z.position.x - playerPos.x;
+      const dz = z.position.z - playerPos.z;
+      const d = Math.hypot(dx, dz);
+      if (d < 0.95 && d > 0.001) {
+        const push = 0.95 - d;
+        z.position.x += (dx / d) * push;
+        z.position.z += (dz / d) * push;
+        z.group.position.copy(z.position);
+      }
+    }
+    // keep them from stacking into one silhouette
+    for (let i = 0; i < this.zombies.length; i++) {
+      const a = this.zombies[i];
+      if (a.dead || !a.group.visible) continue;
+      for (let j = i + 1; j < this.zombies.length; j++) {
+        const b = this.zombies[j];
+        if (b.dead || !b.group.visible) continue;
+        if (Math.abs(a.position.y - b.position.y) > 1.2) continue;
+        let dx = a.position.x - b.position.x;
+        let dz = a.position.z - b.position.z;
+        const d = Math.hypot(dx, dz);
+        if (d > 1.05 || d < 0.0001) continue;
+        const push = (1.05 - d) * 0.45;
+        dx /= d;
+        dz /= d;
+        if (!this.blocked(a.position.x + dx * push, a.position.z + dz * push, a.position.y)) {
+          a.position.x += dx * push;
+          a.position.z += dz * push;
+          a.group.position.copy(a.position);
+        }
+        if (!this.blocked(b.position.x - dx * push, b.position.z - dz * push, b.position.y)) {
+          b.position.x -= dx * push;
+          b.position.z -= dz * push;
+          b.group.position.copy(b.position);
+        }
+      }
+    }
+  }
+}

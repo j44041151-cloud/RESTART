@@ -1,0 +1,19 @@
+RE:START — HACKATHON EDITION
+
+This version streamlines the playable mission flow to three beats:
+1. Arrival Plaza
+2. Solar Walkway
+3. The Restart Core
+
+After the Solar District relay is restored, the story routes reserve power to the remaining Core relay lines. This keeps the finale playable without requiring the Water Station and Overgrown Courtyard missions in a short presentation demo.
+
+The Water and Garden district code/assets are retained for future development.
+The existing Three.js renderer, procedural PBR materials, Restorer GLB, animation system,
+sky, fog, bloom, particles, restoration visuals, sound, HUD, menus, pause/settings and save
+systems are retained.
+
+INSTALL:
+- Extract this ZIP to a new folder, or keep it separate from your original project.
+- Run Play RE-START.bat.
+- Keep the original ZIP as a backup.
+- If testing an older save, start NEW GAME for the three-mission route.

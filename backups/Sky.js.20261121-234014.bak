@@ -1,0 +1,228 @@
+import * as THREE from 'three';
+import { lerp } from '../core/utils.js';
+
+const skyVert = /* glsl */ `
+  varying vec3 vDir;
+  void main() {
+    vDir = position;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+const skyFrag = /* glsl */ `
+  uniform vec3 uZenith;
+  uniform vec3 uHorizon;
+  uniform vec3 uGround;
+  uniform vec3 uSunColor;
+  uniform vec3 uCloudColor;
+  uniform vec3 uSunDir;
+  uniform float uSunI;
+  uniform float uTime;
+  uniform float uCloud;
+  varying vec3 vDir;
+
+  float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+  }
+  float noise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
+               mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
+  }
+  float fbm(vec2 p) {
+    float v = 0.0, a = 0.5;
+    for (int i = 0; i < 5; i++) { v += a * noise(p); p *= 2.03; a *= 0.5; }
+    return v;
+  }
+
+  void main() {
+    vec3 d = normalize(vDir);
+    float h = clamp(d.y * 0.5 + 0.5, 0.0, 1.0);
+    float t = smoothstep(0.03, 0.72, h);
+    vec3 col = mix(uHorizon, uZenith, t);
+    col = mix(uGround, col, smoothstep(-0.16, 0.02, d.y));
+
+    vec3 sd = normalize(uSunDir);
+    float sdot = max(dot(d, sd), 0.0);
+    col += uSunColor * pow(sdot, 900.0) * 14.0 * uSunI;
+    col += uSunColor * pow(sdot, 26.0) * 0.22 * uSunI;
+    col += uSunColor * pow(sdot, 4.0) * 0.06 * uSunI;
+
+    if (uCloud > 0.001) {
+      vec2 uv = d.xz / max(0.16, d.y + 0.32);
+      float c = fbm(uv * 1.35 + vec2(uTime * 0.004, uTime * 0.002));
+      c = smoothstep(0.48, 0.86, c) * smoothstep(0.02, 0.34, d.y);
+      float c2 = fbm(uv * 3.1 - vec2(uTime * 0.007, 0.0));
+      c *= 0.7 + c2 * 0.6;
+      col = mix(col, uCloudColor, clamp(c * uCloud, 0.0, 0.85));
+    }
+
+    gl_FragColor = vec4(col, 1.0);
+  }
+`;
+
+const DEAD = {
+  zenith: new THREE.Color(0x64737f),
+  horizon: new THREE.Color(0xbfae95),
+  ground: new THREE.Color(0x2b2b2c),
+  sun: new THREE.Color(0xffc98a),
+  cloud: new THREE.Color(0x8d8577),
+  cloudAmount: 0.35,
+  fog: new THREE.Color(0xa89a86),
+  fogDensity: 0.0072,
+  sunIntensity: 2.1,
+  hemiSky: new THREE.Color(0x9db0bd),
+  hemiGround: new THREE.Color(0x453b2f),
+  hemiIntensity: 0.5,
+  exposure: 1.0,
+};
+
+const ALIVE = {
+  zenith: new THREE.Color(0x2f6fb4),
+  horizon: new THREE.Color(0xffd7a6),
+  ground: new THREE.Color(0x3c4034),
+  sun: new THREE.Color(0xfff0d2),
+  cloud: new THREE.Color(0xfff6ea),
+  cloudAmount: 0.22,
+  fog: new THREE.Color(0xa9cfe0),
+  fogDensity: 0.0042,
+  sunIntensity: 3.4,
+  hemiSky: new THREE.Color(0xa9d8ff),
+  hemiGround: new THREE.Color(0x68714f),
+  hemiIntensity: 0.95,
+  exposure: 1.06,
+};
+
+export class SkyRig {
+  constructor(scene, renderer, quality = 'high') {
+    this.scene = scene;
+    this.renderer = renderer;
+    this.t = 0;
+    this.targetT = 0;
+
+    this.uniforms = {
+      uZenith: { value: DEAD.zenith.clone() },
+      uHorizon: { value: DEAD.horizon.clone() },
+      uGround: { value: DEAD.ground.clone() },
+      uSunColor: { value: DEAD.sun.clone() },
+      uCloudColor: { value: DEAD.cloud.clone() },
+      uSunDir: { value: new THREE.Vector3(0.55, 0.42, -0.7).normalize() },
+      uSunI: { value: 1.0 },
+      uTime: { value: 0 },
+      uCloud: { value: DEAD.cloudAmount },
+    };
+
+    const geo = new THREE.SphereGeometry(520, 40, 24);
+    this.skyMat = new THREE.ShaderMaterial({
+      vertexShader: skyVert,
+      fragmentShader: skyFrag,
+      uniforms: this.uniforms,
+      side: THREE.BackSide,
+      depthWrite: false,
+      fog: false,
+    });
+    this.sky = new THREE.Mesh(geo, this.skyMat);
+    this.sky.frustumCulled = false;
+    this.sky.renderOrder = -10;
+    scene.add(this.sky);
+
+    scene.fog = new THREE.FogExp2(DEAD.fog.getHex(), DEAD.fogDensity);
+
+    // Lights --------------------------------------------------------------
+    this.sun = new THREE.DirectionalLight(0xffe0b8, DEAD.sunIntensity);
+    this.sun.castShadow = true;
+    const shadowSize = quality === 'low' ? 1024 : quality === 'medium' ? 2048 : 2048;
+    this.sun.shadow.mapSize.set(shadowSize, shadowSize);
+    const sc = this.sun.shadow.camera;
+    sc.left = -58; sc.right = 58; sc.top = 58; sc.bottom = -58;
+    sc.near = 1; sc.far = 260;
+    this.sun.shadow.bias = -0.0006;
+    this.sun.shadow.normalBias = 0.035;
+    this.sun.shadow.radius = 2.5;
+    scene.add(this.sun);
+    this.sunTarget = new THREE.Object3D();
+    scene.add(this.sunTarget);
+    this.sun.target = this.sunTarget;
+
+    this.hemi = new THREE.HemisphereLight(DEAD.hemiSky, DEAD.hemiGround, DEAD.hemiIntensity);
+    scene.add(this.hemi);
+
+    this.fillLight = new THREE.AmbientLight(0x33404a, 0.35);
+    scene.add(this.fillLight);
+
+    this._buildEnvironment();
+    this.setRestoration(0, true);
+  }
+
+  _buildEnvironment() {
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    pmrem.compileEquirectangularShader();
+    const envScene = new THREE.Scene();
+    const mat = this.skyMat.clone();
+    mat.uniforms.uSunI.value = 0.6;
+    const sphere = new THREE.Mesh(new THREE.SphereGeometry(80, 24, 16), mat);
+    envScene.add(sphere);
+    const ground = new THREE.Mesh(
+      new THREE.CircleGeometry(70, 24),
+      new THREE.MeshBasicMaterial({ color: 0x3d3a33 })
+    );
+    ground.rotation.x = -Math.PI / 2;
+    ground.position.y = -6;
+    envScene.add(ground);
+    const rt = pmrem.fromScene(envScene, 0.03, 0.1, 200);
+    this.scene.environment = rt.texture;
+    this.envMap = rt.texture;
+    sphere.geometry.dispose();
+    mat.dispose();
+    ground.geometry.dispose();
+    ground.material.dispose();
+    pmrem.dispose();
+  }
+
+  setRestoration(t, instant = false) {
+    this.targetT = t;
+    if (instant) this.t = t;
+    this._apply();
+  }
+
+  _apply() {
+    const t = this.t;
+    const u = this.uniforms;
+    u.uZenith.value.lerpColors(DEAD.zenith, ALIVE.zenith, t);
+    u.uHorizon.value.lerpColors(DEAD.horizon, ALIVE.horizon, t);
+    u.uGround.value.lerpColors(DEAD.ground, ALIVE.ground, t);
+    u.uSunColor.value.lerpColors(DEAD.sun, ALIVE.sun, t);
+    u.uCloudColor.value.lerpColors(DEAD.cloud, ALIVE.cloud, t);
+    u.uCloud.value = lerp(DEAD.cloudAmount, ALIVE.cloudAmount, t);
+    u.uSunI.value = lerp(1.0, 1.9, t);
+
+    this.sun.color.copy(DEAD.sun).lerp(ALIVE.sun, t);
+    this.sun.intensity = lerp(DEAD.sunIntensity, ALIVE.sunIntensity, t);
+    this.hemi.color.copy(DEAD.hemiSky).lerp(ALIVE.hemiSky, t);
+    this.hemi.groundColor.copy(DEAD.hemiGround).lerp(ALIVE.hemiGround, t);
+    this.hemi.intensity = lerp(DEAD.hemiIntensity, ALIVE.hemiIntensity, t);
+    this.renderer.toneMappingExposure = lerp(DEAD.exposure, ALIVE.exposure, t);
+
+    if (this.scene.fog) {
+      this.scene.fog.color.lerpColors(DEAD.fog, ALIVE.fog, t);
+      this.scene.fog.density = lerp(DEAD.fogDensity, ALIVE.fogDensity, t);
+    }
+  }
+
+  update(dt, playerPos, camera) {
+    this.uniforms.uTime.value += dt;
+    if (Math.abs(this.t - this.targetT) > 0.001) {
+      this.t += (this.targetT - this.t) * Math.min(1, dt * 0.9);
+      this._apply();
+    }
+    this.sky.position.copy(camera.position);
+    const sunDir = this.uniforms.uSunDir.value;
+    this.sunTarget.position.set(playerPos.x, 0, playerPos.z);
+    this.sun.position.set(
+      playerPos.x + sunDir.x * 110,
+      Math.max(30, sunDir.y * 150),
+      playerPos.z + sunDir.z * 110
+    );
+  }
+}

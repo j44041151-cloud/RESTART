@@ -1,0 +1,120 @@
+# RE:START — A Bounce Back Game
+
+A complete third-person 3D adventure set in Aster, a dead futuristic city. You are a
+Restorer: reconnect the energy network, solve the district puzzles, and bring the
+city back to life.
+
+Built with three.js and procedural art/audio. No paid assets, no build step, no
+npm install, no internet connection required to play.
+
+---
+
+## Play on Windows
+
+1. Double-click **`Play RE-START.bat`**.
+2. Your default browser opens the game at `http://127.0.0.1:8137/`.
+3. Keep the small console window open while playing; close it to stop the server.
+
+Chrome or Edge is recommended. The server is a plain PowerShell TCP server, so it
+needs no admin rights and no installed runtime.
+
+## Controls
+
+| Action | Key |
+| --- | --- |
+| Move | `W` `A` `S` `D` |
+| Look | Mouse (pointer lock, or click-drag if lock is blocked) |
+| Run | `Shift` |
+| Jump | `Space` |
+| Interact | `E` |
+| Shoot / Punch | `Left click` |
+| Insight Spark | `H` |
+| Pause menu | `Esc` |
+| Fullscreen | `F` |
+
+The **main menu** offers New Game, Continue (enabled after a save), Settings and
+Controls. Progress is saved automatically at checkpoints, district restorations,
+mission completions, and every 25 seconds while playing.
+
+## Hackathon edition — three missions
+
+1. **Arrival Plaza** — meet RELAY, learn the controls, leap the barricade, activate the plaza terminal.
+2. **Solar Walkway** — cross the maintenance route, repair three arrays, activate the inverter and power the district relay.
+3. **The Restart Core** — reserve power brings the remaining relay lines online; reach the Core, activate it, and watch Aster return.
+
+The hackathon route focuses on the strongest movement, repair, restoration and finale moments. The original Water Station and Overgrown Courtyard assets remain in the project for future expansion, but are not required in this short demo flow.
+
+## The infected
+
+Aster did not empty out cleanly. Shambling infected wander the plaza edges, the four
+streets, the side districts and the Core approach. They drift toward movement, growl
+when they close in, and claw at the Restorer — each hit drains health and shoves you.
+Health regenerates once you have been out of reach for a few seconds, and at zero the
+screen reads **RESTORER DOWN** before you wake at the last checkpoint with full health
+and every restored panel intact.
+
+You are not defenceless:
+
+- **Pistol caches** sit in the plaza, on the Solar Walkway and at the Water Station. Walk over one to pick it up.
+- **Ammo crates** are scattered along every route, and downed infected sometimes drop spare rounds.
+- **Bare hands** always work. Left click fires the pistol when it has rounds, and swings a punch when it does not.
+
+The HUD shows health and the current weapon, plus a crosshair while the pistol is loaded.
+
+## Insight Sparks
+
+When you struggle (falls, repeated wrong puzzle attempts, or a long time on one
+objective), RELAY offers an **Insight Spark**. Press `H` for a specific hint plus a
+temporary **Insight Surge**: a speed/jump boost and a mid-air bounce. Sparks never
+remove completed progress, repaired panels, collected cells, or checkpoints.
+Setbacks only add knowledge — that is the bounce-back theme in mechanical form.
+
+## Restoration
+
+Before restoration Aster is a disaster zone. Craters split the approaches, the road
+surface is buckled into lifted slabs, most of the skyline is gutted or collapsed with
+exposed floors and hanging rebar, a broken walkway has smashed through the pavement,
+and the failed evacuation checkpoint is still lined with sandbags, burnt-out buses and
+scattered papers. Dust chokes the ochre sky and smoke still rises from the ruins.
+Each completed district turns on windows, street lamps and holograms, grows instanced
+vegetation, starts water and particles, dissipates the smoke, and shifts the sky, fog,
+sun and music toward a warm, living palette. The finale restores the entire district
+with a cinematic flythrough.
+
+## Project structure
+
+```
+index.html                 UI shell + importmap
+css/style.css              HUD, menus, cinematic overlays
+js/main.js                 game loop, missions, saving, ending
+js/core/                   input, procedural audio, save, math + collision
+js/player/                 character controller, animation, camera rig
+js/world/                  procedural textures/materials, sky, city, vegetation, VFX
+js/world/districts/        Plaza, Solar, Water, Garden, Core (+ relay pylon)
+js/gameplay/               missions, Insight Sparks, interactables, pickups
+js/ui/UI.js                HUD / menu / cinematic interface
+vendor/                    three.js r160 + loaders & post-processing (MIT)
+js/player/RestorerModel.js procedural Restorer character + procedural animation
+server.ps1                 local static server (PowerShell, admin-free)
+Play RE-START.bat          Windows launcher
+```
+
+## Performance
+
+Quality presets (Settings → Graphics Quality) change render resolution, shadow map
+size, MSAA and bloom. The city is merged per-material for a low draw-call count,
+vegetation is instanced, and collision uses a coarse spatial grid.
+
+## Assets & licences
+
+- **three.js** r160 — MIT licence (`vendor/`).
+- **The Restorer** — built procedurally from three.js primitives in
+  `js/player/RestorerModel.js`: detailed face with dark tousled hair, light stone-grey
+  open tech jacket with a grey hood and scarf, black inner shirt with glowing cyan chest
+  bars and triangle core, tan leather harness and hip pouch, fingerless gloves with bare
+  fingers, cargo trousers with thigh straps and knee guards, and heavy black boots with
+  cyan emblems and glowing laces. Idle/walk/run/jump animation is generated in code.
+  No external character model is required to play.
+- **Everything else** — sky shader, PBR textures, city, props, vegetation, particles,
+  music and sound effects are generated procedurally at runtime from code in this folder.
+- No paid assets, subscriptions or external services are required.
