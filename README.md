@@ -114,13 +114,46 @@ used for gameplay. The procedural Restorer remains the playable character.
 ## Opening cinematic and ending
 
 - `assets/videos/restart_intro.mp4` is supported fullscreen with narration
-  audio, game-drawn subtitles, skip button and a missing-file fallback reel.
-  See `assets/videos/README.txt`. No fake video is shipped.
-- New Game always plays the cinematic; Continue never replays it.
+  audio, game-drawn subtitles, a SKIP INTRO button, autoplay fallback and a
+  graceful missing-file path. See `assets/videos/README.txt`. No fake video is
+  shipped.
+- The cinematic plays once on the first launch of a browser session, before the
+  main menu, and never starts gameplay by itself. Replay it from the menu with
+  REPLAY CINEMATIC.
 - The ending is a staged cinematic: silence and darkness, one Hollowed becoming
   still, the first awakening, others recovering while some stay unconscious, the
   network broadcast, faint windows lighting up, survivors emerging, and the title.
   It does not magically repair the whole city.
+
+---
+
+## Music
+
+All music is synthesised at runtime in `js/core/Music.js` (no audio files). Six
+stems — `amb`, `tension`, `threat`, `hope`, `melody`, `relief` — are crossfaded
+by gain rather than restarted, so moods change without cuts or duplicate loops.
+`AudioEngine` is the only public surface:
+
+| Call | Effect |
+| --- | --- |
+| `setMusicState('menu'\|'intro'\|'exploration'\|'relief'\|'ending')` | base mood |
+| `setDanger(0..1)` | slow pulse under exploration; no urgent layer |
+| `setThreatLevel(level, urgent)` | `urgent=true` only for a real chase/attack |
+| `relief(seconds)` | one warm swell, then back to the base mood |
+| `setMusicPaused(true)` | pause-menu bow-down, resumes smoothly |
+| `setMuted(true)` | master mute, levels preserved |
+
+Mood mapping: menu and the opening cinematic are sparse and uneasy; exploration
+adds a slow pulse that grows with proximity; any Hollowed in the `chase` state
+(attack/detection) switches on the urgent percussion layer; a restored district,
+checkpoint respawn or chapter completion triggers relief; restoration raises warm
+chords and the melodic line; the ending uses the full hope layer.
+
+Future zombie events that are not chases (e.g. a scripted scream or a hunt
+warning) should call `audio.setThreatLevel(level, true)` only while the threat is
+actually active, and `audio.setThreatLevel(level, false)` when it ends. Ordinary
+proximity must stay on `setDanger()` so the chase layer never plays during calm
+exploration.
 
 ---
 

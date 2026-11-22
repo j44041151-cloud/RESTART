@@ -107,6 +107,7 @@ export class UI {
     const onClick = (id, fn) => $(id).addEventListener('click', () => fn && fn());
     onClick('btn-new', () => this.callbacks.newGame && this.callbacks.newGame());
     onClick('btn-continue', () => this.callbacks.continueGame && this.callbacks.continueGame());
+    onClick('btn-replay-cinematic', () => this.callbacks.replayCinematic && this.callbacks.replayCinematic());
     onClick('btn-settings', () => this.showSettings('settings'));
     onClick('btn-controls', () => this.showSettings('controls'));
     onClick('btn-resume', () => this.callbacks.resume && this.callbacks.resume());
@@ -149,6 +150,10 @@ export class UI {
 
   showMenu(hasSave) {
     this.el.menu.classList.remove('hidden');
+    // Restart the entrance animation so the cinematic -> menu hand-off is soft.
+    this.el.menu.classList.remove('menu-in');
+    void this.el.menu.offsetWidth;
+    this.el.menu.classList.add('menu-in');
     this.el.hud.classList.add('hidden');
     this.el.continueBtn.disabled = !hasSave;
   }

@@ -1,6 +1,11 @@
+import { MusicDirector, MUSIC_STATES } from './Music.js';
+
 /**
  * Fully procedural audio: ambient score, wind, water, footsteps and
  * sci-fi interaction feedback. No audio files, no licensing, no downloads.
+ *
+ * The score itself lives in Music.js (MusicDirector) and is driven from here so
+ * gameplay code only ever talks to AudioEngine.
  */
 export class AudioEngine {
   constructor() {
@@ -11,11 +16,22 @@ export class AudioEngine {
     this.restoration = 0;
     this.musicRestoration = 0;
     this.time = 0;
-    this.arpTimer = 0;
-    this.padTimer = 0;
     this.birdTimer = 4;
     this.waterRunning = false;
     this.noteIndex = 0;
+    this.duckLevel = 1;
+    this.duckUntil = 0;
+    this.duckAmount = 1;
+    this.moveDuckUntil = 0;
+    this.threat = 0;
+    this.threatTimer = 6;
+    this.envTimer = 7;
+    this.surface = 'concrete';
+    this.muted = false;
+    // Remembered before init() so the score starts in the right mood once the
+    // browser allows audio (first pointer interaction).
+    this.musicState = MUSIC_STATES.MENU;
+    this.music = null;
   }
 
   init() {
@@ -27,7 +43,7 @@ export class AudioEngine {
     if (!AC) return;
     this.ctx = new AC();
     this.master = this.ctx.createGain();
-    this.master.gain.value = this.masterVolume;
+    this.master.gain.value = this.muted ? 0.0001 : this.masterVolume;
     this.master.connect(this.ctx.destination);
 
     this.musicBus = this.ctx.createGain();
@@ -38,13 +54,34 @@ export class AudioEngine {
     this.sfxBus.gain.value = 0.9;
     this.sfxBus.connect(this.master);
 
+    this.ambienceBus = this.ctx.createGain();
+    this.ambienceBus.gain.value = 0.9;
+    this.ambienceBus.connect(this.master);
+
+    // One dark convolution space for the whole game; each surface decides how
+    // much of itself it sends here, so metal rings and sand stays dry.
+    this.reverb = this.ctx.createConvolver();
+    this.reverb.buffer = this._makeImpulse(2.6);
+    this.reverbReturn = this.ctx.createGain();
+    this.reverbReturn.gain.value = 0.5;
+    this.reverb.connect(this.reverbReturn).connect(this.master);
+    this.reverbSend = this.ctx.createGain();
+    this.reverbSend.gain.value = 1;
+    this.reverbSend.connect(this.reverb);
+
     this.noiseBuffer = this._makeNoise(2, 'white');
     this.brownBuffer = this._makeNoise(4, 'brown');
 
+    // Layered, crossfading score (see Music.js). One instance, ever.
+    if (!this.music) {
+      this.music = new MusicDirector(this.ctx, this.musicBus, this.noiseBuffer);
+      this.music.setState(this.musicState);
+      this.music.setRestoration(this.musicRestoration);
+    }
+
+    this._startHum();
     this._startWind();
     this.ready = true;
-    this.padTimer = 0;
-    this._pad();
   }
 
   _makeNoise(seconds, type) {
@@ -66,12 +103,24 @@ export class AudioEngine {
 
   setMasterVolume(v) {
     this.masterVolume = v;
-    if (this.master) this.master.gain.value = v;
+    this._applyMasterGain();
+  }
+
+  /** Mute switch (no dedicated UI yet; kept for future settings work). */
+  setMuted(on) {
+    this.muted = !!on;
+    this._applyMasterGain();
+  }
+
+  _applyMasterGain() {
+    if (!this.master) return;
+    const level = this.muted ? 0.0001 : this.masterVolume;
+    this.master.gain.setTargetAtTime(level, this.ctx.currentTime, 0.05);
   }
 
   setMusicVolume(v) {
     this.musicVolume = v;
-    if (this.musicBus) this.musicBus.gain.value = v;
+    if (this.musicBus) this.musicBus.gain.value = v * this.duckLevel;
   }
 
   _startWind() {
@@ -88,7 +137,7 @@ export class AudioEngine {
     const lfoGain = this.ctx.createGain();
     lfoGain.gain.value = 0.06;
     lfo.connect(lfoGain).connect(gain.gain);
-    src.connect(filter).connect(gain).connect(this.sfxBus);
+    src.connect(filter).connect(gain).connect(this.ambienceBus);
     src.start();
     lfo.start();
     this.windGain = gain;
@@ -136,39 +185,59 @@ export class AudioEngine {
     osc.stop(t + dur + 0.05);
   }
 
-  _pad() {
-    if (!this.ready) return;
-    const alive = this.musicRestoration;
-    // A minor in the dead city, A major when the light returns
-    const third = alive > 0.5 ? 277.18 : 261.63;
-    const chord = [110, 164.81, third, 220 * (alive > 0.5 ? 1.25 : 1)];
-    chord.forEach((f, i) => {
-      this._note(f, i * 0.04, 8.5, 'triangle', 0.035 + alive * 0.01, 900);
-      this._note(f * 2.002, i * 0.04 + 0.05, 8, 'sine', 0.018, 1400);
-    });
-    this.padTimer = 8.5;
-  }
-
-  _arp() {
-    if (!this.ready) return;
-    const scale = this.musicRestoration > 0.5
-      ? [440, 493.88, 554.37, 659.25, 739.99, 880]
-      : [440, 523.25, 587.33, 659.25, 783.99, 880];
-    const n = scale[this.noteIndex % scale.length];
-    this.noteIndex += this.musicRestoration > 0.5 ? 1 : 2;
-    this._note(n, 0, 1.6, 'sine', 0.022, 2200);
-    if (this.musicRestoration > 0.5) this._note(n * 2, 0.02, 1.2, 'triangle', 0.008, 3000);
-    this.arpTimer = this.musicRestoration > 0.5 ? 0.75 : 1.35;
-  }
-
   setRestoration(t) {
     this.restoration = t;
+    if (this.music) this.music.setRestoration(t);
+  }
+
+  // ---- music direction (single entry points for gameplay code) -----------
+  /**
+   * Switch the score's base mood: 'menu' | 'intro' | 'exploration' |
+   * 'danger' | 'threat' | 'relief' | 'hope' | 'ending' | 'silent'.
+   * Safe to call before init(); the mood is applied when audio starts.
+   */
+  setMusicState(name) {
+    this.musicState = name;
+    if (this.music) this.music.setState(name);
+  }
+
+  /**
+   * Danger drives the exploration bed: 0 calm … 1 a Hollowed at arm's length.
+   * This raises tension but never starts the urgent chase layer by itself.
+   */
+  setDanger(level) {
+    if (this.music) this.music.setDanger(level);
+  }
+
+  /**
+   * Urgent layer on/off. Call with true only for a real attack, detection or
+   * chase (zombie state === 'chase'), and false once the last hunter gives up.
+   */
+  setThreatLevel(level, urgent = false) {
+    if (!this.music) return;
+    this.music.setDanger(level);
+    this.music.setUrgent(urgent);
+  }
+
+  /** Short warm swell: district restored, checkpoint after a death. */
+  relief(seconds = 9) {
+    if (this.music) this.music.triggerRelief(seconds);
+  }
+
+  /** Pause menu: bow the score down smoothly; resume() fades it back. */
+  setMusicPaused(on) {
+    if (this.music) this.music.setPaused(on);
   }
 
   sfx(name, opts = {}) {
     if (!this.ready) return;
     const t = this.ctx.currentTime + (opts.delay || 0);
     const vol = opts.volume ?? 1;
+    if (['relayVoice', 'recording', 'activate', 'relay', 'core', 'missionComplete'].includes(name)) {
+      this.duckMusic(0.6, 2.2);
+    } else if (['pistol', 'hurt', 'zombieAlert', 'missionStart'].includes(name)) {
+      this.duckMusic(0.82, 0.7);
+    }
     switch (name) {
       case 'jump': {
         const o = this.ctx.createOscillator();
@@ -601,33 +670,294 @@ export class AudioEngine {
     }
   }
 
-  footstep(vol = 0.35) {
+  /**
+   * A single footfall. `surface` selects the material; volume, speed and pan
+   * keep each step slightly different so the walk never sounds mechanical.
+   * Old callers passing a number still work.
+   */
+  footstep(opts = 0.35) {
     if (!this.ready) return;
-    const t = this.ctx.currentTime;
-    const src = this.ctx.createBufferSource();
-    src.buffer = this.noiseBuffer;
-    src.playbackRate.value = 0.7 + Math.random() * 0.6;
-    const f = this.ctx.createBiquadFilter();
-    f.type = 'bandpass';
-    f.frequency.value = 320 + Math.random() * 420;
-    f.Q.value = 1.4;
-    const g = this.ctx.createGain();
-    g.gain.setValueAtTime(0.11 * vol, t);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.14);
-    src.connect(f).connect(g).connect(this.sfxBus);
-    src.start(t);
-    src.stop(t + 0.16);
+    const o = typeof opts === 'number' ? { volume: opts } : (opts || {});
+    const surface = o.surface || this.surface || 'concrete';
+    const speed = o.speed ?? 4.0;
+    const weight = Math.min(1, Math.max(0.35, speed / 7.5));
+    const vol = (o.volume ?? 0.35) * (0.85 + weight * 0.3);
+    const t = this.ctx.currentTime + 0.002;
+    const pan = o.pan ?? (Math.random() * 0.5 - 0.25);
+    const rate = 0.92 + Math.random() * 0.2;
+    const out = this._stepOut(this._surfaceWet(surface), pan);
+    this._surfaceStep(surface, t, out, vol, weight, rate);
+    if (o.blendSurface && o.blend > 0) {
+      // crossing between two surfaces: fade the previous material out under
+      // the new one instead of snapping
+      const b = Math.min(1, Math.max(0, o.blend));
+      this._surfaceStep(o.blendSurface, t + 0.006, out, vol * b * 0.55, weight, rate * 1.05);
+    }
+    if (speed > 5.6) this.duckMusic(0.93, 0.3);
   }
 
-  update(dt, restoration = 0) {
+  _surfaceWet(surface) {
+    return { sand: 0.05, mud: 0.05, concrete: 0.22, rubble: 0.17, metal: 0.32, water: 0.13 }[surface] ?? 0.18;
+  }
+
+  _surfaceStep(surface, t, out, vol, weight, rate) {
+    switch (surface) {
+      case 'sand': {
+        this._noiseBurst(t, out, { dur: 0.16, freq: 1900, q: 0.7, gain: 0.16 * vol, rate });
+        this._noiseBurst(t + 0.02, out, { dur: 0.28, freq: 620, q: 0.6, gain: 0.08 * vol, rate: rate * 0.8 });
+        this._toneBurst(t, out, { freq: 96, end: 58, dur: 0.14, gain: 0.045 * vol });
+        break;
+      }
+      case 'mud': {
+        this._toneBurst(t, out, { freq: 110, end: 52, dur: 0.2, gain: 0.11 * vol });
+        this._noiseBurst(t, out, { dur: 0.22, freq: 340, q: 1.1, gain: 0.13 * vol, rate: rate * 0.7 });
+        if (Math.random() < 0.3) {
+          this._noiseBurst(t + 0.06, out, { dur: 0.24, freq: 780, q: 5, gain: 0.06 * vol, rate: 0.6 });
+          this._toneBurst(t + 0.05, out, { freq: 210, end: 105, dur: 0.12, gain: 0.03 * vol });
+        }
+        break;
+      }
+      case 'concrete': {
+        this._toneBurst(t, out, { freq: 128 + 30 * weight, end: 60, dur: 0.16, gain: 0.1 * vol });
+        this._noiseBurst(t, out, { dur: 0.1, freq: 900, q: 0.9, gain: 0.1 * vol, rate });
+        // short urban slapback
+        const delay = this.ctx.createDelay(0.3);
+        delay.delayTime.value = 0.085;
+        const fb = this.ctx.createGain();
+        fb.gain.value = 0.18;
+        const echo = this.ctx.createGain();
+        echo.gain.value = 0.2;
+        out.connect(delay);
+        delay.connect(fb).connect(delay);
+        delay.connect(echo).connect(this.sfxBus);
+        this._noiseBurst(t + 0.05, out, { dur: 0.12, freq: 700, gain: 0.045 * vol, rate });
+        break;
+      }
+      case 'rubble': {
+        this._toneBurst(t, out, { freq: 150, end: 68, dur: 0.12, gain: 0.095 * vol });
+        this._noiseBurst(t, out, { dur: 0.09, freq: 1500, q: 1.4, gain: 0.11 * vol, rate });
+        const grit = 2 + ((Math.random() * 3) | 0);
+        for (let i = 0; i < grit; i++) {
+          this._noiseBurst(t + 0.03 + Math.random() * 0.14, out, {
+            dur: 0.04 + Math.random() * 0.06,
+            freq: 2200 + Math.random() * 3200,
+            q: 2,
+            gain: 0.03 * vol,
+            rate: 0.8 + Math.random() * 0.5,
+          });
+        }
+        break;
+      }
+      case 'metal': {
+        const base = 520 + Math.random() * 160;
+        this._noiseBurst(t, out, { dur: 0.07, freq: 3400, q: 1.1, gain: 0.12 * vol, rate });
+        this._toneBurst(t, out, { freq: base, end: base * 0.92, dur: 0.42, gain: 0.05 * vol, type: 'triangle' });
+        this._toneBurst(t, out, { freq: base * 2.41, dur: 0.28, gain: 0.026 * vol });
+        this._toneBurst(t, out, { freq: base * 3.77, dur: 0.18, gain: 0.016 * vol });
+        this._toneBurst(t, out, { freq: 92, end: 55, dur: 0.13, gain: 0.055 * vol });
+        break;
+      }
+      case 'water': {
+        this._noiseBurst(t, out, { dur: 0.26, freq: 2600, q: 0.6, gain: 0.12 * vol, rate: rate * 1.2 });
+        this._noiseBurst(t + 0.03, out, { dur: 0.18, freq: 900, q: 0.8, gain: 0.07 * vol, rate });
+        this._toneBurst(t + 0.02, out, { freq: 620 + Math.random() * 180, end: 1500, dur: 0.09, gain: 0.018 * vol });
+        this._toneBurst(t, out, { freq: 140, end: 70, dur: 0.12, gain: 0.05 * vol });
+        break;
+      }
+      default: break;
+    }
+  }
+
+  jumpSound(surface = 'concrete', volume = 0.5) {
+    if (!this.ready) return;
+    const t = this.ctx.currentTime + 0.002;
+    const out = this._stepOut(0.12, 0);
+    this._noiseBurst(t, out, { dur: 0.18, freq: 1200, q: 0.8, gain: 0.055 * volume, rate: 1.1 });
+    this._toneBurst(t, out, { freq: 160, end: 88, dur: 0.14, gain: 0.04 * volume });
+    if (surface === 'metal') this._toneBurst(t, out, { freq: 640, dur: 0.3, gain: 0.03 * volume, type: 'triangle' });
+    if (surface === 'water') this._noiseBurst(t, out, { dur: 0.24, freq: 2400, q: 0.7, gain: 0.06 * volume });
+    if (surface === 'sand' || surface === 'mud') this._noiseBurst(t, out, { dur: 0.2, freq: 700, gain: 0.055 * volume, rate: 0.8 });
+  }
+
+  landSound(surface = 'concrete', impact = 0.5) {
+    if (!this.ready) return;
+    const t = this.ctx.currentTime + 0.002;
+    const out = this._stepOut(this._surfaceWet(surface), 0);
+    const vol = 0.5 + impact * 0.65;
+    this._toneBurst(t, out, { freq: 96, end: 40, dur: 0.26, gain: 0.15 * vol });
+    this._noiseBurst(t, out, { dur: 0.16, freq: 700, q: 0.7, gain: 0.11 * vol, rate: 0.8 });
+    this._surfaceStep(surface, t + 0.01, out, vol * 0.8, 1, 0.9);
+  }
+
+  setThreat(level) {
+    this.threat = Math.max(0, Math.min(1, level));
+  }
+
+  /** Lower the score for dialogue, close movement and key effects. */
+  duckMusic(amount = 0.7, seconds = 1.0) {
+    this.duckAmount = Math.min(this.duckAmount, amount);
+    this.duckUntil = Math.max(this.duckUntil, this.time + seconds);
+  }
+
+  _stepOut(reverb, pan) {
+    const out = this.ctx.createGain();
+    const panner = this.ctx.createStereoPanner ? this.ctx.createStereoPanner() : null;
+    if (panner) {
+      panner.pan.value = Math.max(-1, Math.min(1, pan || 0));
+      out.connect(panner).connect(this.sfxBus);
+      if (reverb > 0) {
+        const send = this.ctx.createGain();
+        send.gain.value = reverb;
+        panner.connect(send).connect(this.reverbSend);
+      }
+    } else {
+      out.connect(this.sfxBus);
+      if (reverb > 0) {
+        const send = this.ctx.createGain();
+        send.gain.value = reverb;
+        out.connect(send).connect(this.reverbSend);
+      }
+    }
+    return out;
+  }
+
+  _noiseBurst(t, out, { dur = 0.16, freq = 900, q = 1.2, type = 'bandpass', gain = 0.2, rate = 1, attack = 0.003 } = {}) {
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuffer;
+    src.playbackRate.value = rate;
+    const f = this.ctx.createBiquadFilter();
+    f.type = type;
+    f.frequency.value = freq;
+    f.Q.value = q;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(Math.max(0.0002, gain), t + attack);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    src.connect(f).connect(g).connect(out);
+    src.start(t);
+    src.stop(t + dur + 0.04);
+  }
+
+  _toneBurst(t, out, { freq = 200, end = 0, dur = 0.2, gain = 0.06, type = 'sine', attack = 0.003 } = {}) {
+    const o = this.ctx.createOscillator();
+    o.type = type;
+    o.frequency.setValueAtTime(freq, t);
+    if (end) o.frequency.exponentialRampToValueAtTime(Math.max(20, end), t + dur);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(Math.max(0.0002, gain), t + attack);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g).connect(out);
+    o.start(t);
+    o.stop(t + dur + 0.04);
+  }
+
+  _makeImpulse(seconds) {
+    const len = Math.floor(this.ctx.sampleRate * seconds);
+    const buf = this.ctx.createBuffer(2, len, this.ctx.sampleRate);
+    for (let ch = 0; ch < 2; ch++) {
+      const d = buf.getChannelData(ch);
+      let last = 0;
+      for (let i = 0; i < len; i++) {
+        const w = Math.random() * 2 - 1;
+        last = (last + 0.14 * w) / 1.14;
+        d[i] = last * Math.pow(1 - i / len, 2.4);
+      }
+    }
+    return buf;
+  }
+
+  _startHum() {
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 320;
+    const gain = this.ctx.createGain();
+    gain.gain.value = 0.003;
+    this.humOsc = [];
+    for (const [f, a] of [[60, 0.5], [120, 0.3], [180.4, 0.12]]) {
+      const o = this.ctx.createOscillator();
+      o.type = 'sine';
+      o.frequency.value = f;
+      const g = this.ctx.createGain();
+      g.gain.value = a;
+      o.connect(g).connect(filter);
+      o.start();
+      this.humOsc.push(o);
+    }
+    filter.connect(gain).connect(this.ambienceBus);
+    this.humGain = gain;
+  }
+
+  _distantMetal() {
+    const t = this.ctx.currentTime;
+    const out = this._stepOut(0.6, Math.random() * 1.6 - 0.8);
+    const base = 300 + Math.random() * 380;
+    this._noiseBurst(t, out, { dur: 0.5, freq: 900 + Math.random() * 800, q: 6, gain: 0.012, rate: 0.5 });
+    this._toneBurst(t, out, { freq: base, dur: 0.9, gain: 0.007, type: 'triangle' });
+  }
+
+  _relayStatic() {
+    const out = this._stepOut(0.3, Math.random() * 0.8 - 0.4);
+    const t = this.ctx.currentTime;
+    this._noiseBurst(t, out, { dur: 0.18, freq: 2400, q: 3, gain: 0.012, rate: 1.4 });
+    this._toneBurst(t, out, { freq: 880, dur: 0.06, gain: 0.005, type: 'square' });
+  }
+
+  _distantGroan(threat) {
+    const t = this.ctx.currentTime;
+    const out = this._stepOut(0.75, Math.random() * 1.2 - 0.6);
+    const f = 70 + Math.random() * 30;
+    this._toneBurst(t, out, { freq: f, end: f * 0.8, dur: 1.6, gain: 0.01 + threat * 0.018, type: 'sawtooth' });
+    this._noiseBurst(t, out, { dur: 1.4, freq: 300, q: 1.6, gain: 0.007 + threat * 0.01, rate: 0.5 });
+  }
+
+  update(dt, restoration = 0, playerPos = null) {
     if (!this.ready) return;
     this.time += dt;
     this.musicRestoration += (restoration - this.musicRestoration) * Math.min(1, dt * 0.5);
 
-    this.padTimer -= dt;
-    if (this.padTimer <= 0) this._pad();
-    this.arpTimer -= dt;
-    if (this.arpTimer <= 0) this._arp();
+    // ---- music ducking ---------------------------------------------------
+    const duckGoal = this.time < this.duckUntil ? this.duckAmount : 1;
+    const moveGoal = this.time < this.moveDuckUntil ? 0.9 : 1;
+    const goal = Math.min(duckGoal, moveGoal);
+    this.duckLevel += (goal - this.duckLevel) * Math.min(1, dt * 4);
+    if (this.musicBus) this.musicBus.gain.value = this.musicVolume * this.duckLevel;
+    if (this.time >= this.duckUntil) this.duckAmount = 1;
+
+    // ---- electrical hum: audible near powered equipment ------------------
+    if (this.humGain) {
+      let near = 0;
+      if (playerPos) {
+        for (const [x, z] of [[0, 0], [86, 0], [-72, 0], [0, 88], [0, -100]]) {
+          const d = Math.hypot(playerPos.x - x, playerPos.z - z);
+          near = Math.max(near, Math.max(0, 1 - d / 26));
+        }
+      }
+      const humGoal = 0.003 + this.musicRestoration * 0.012 + near * 0.01;
+      this.humGain.gain.value += (humGoal - this.humGain.gain.value) * Math.min(1, dt * 1.5);
+    }
+
+    // ---- sparse environmental life --------------------------------------
+    this.envTimer -= dt;
+    if (this.envTimer <= 0) {
+      this.envTimer = 10 + Math.random() * 18;
+      if (Math.random() < 0.55) this._distantMetal();
+      else this._relayStatic();
+    }
+
+    // ---- distant threat: muffled groans and shifting weight -------------
+    if (this.threat > 0.12) {
+      this.threatTimer -= dt;
+      if (this.threatTimer <= 0) {
+        this.threatTimer = 5 + Math.random() * 8;
+        this._distantGroan(this.threat);
+      }
+    } else {
+      this.threatTimer = Math.min(this.threatTimer, 4);
+    }
+
+    // ---- original layered score ------------------------------------------
+    if (this.music) this.music.update(dt);
 
     if (this.musicRestoration > 0.55) {
       this.birdTimer -= dt;

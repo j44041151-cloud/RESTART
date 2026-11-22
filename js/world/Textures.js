@@ -664,3 +664,306 @@ export function getGlowTexture() {
   glowTex.colorSpace = THREE.SRGBColorSpace;
   return glowTex;
 }
+
+/* ------------------------------------------------------------------------- */
+/* Character surfaces: human skin, necrotic skin, raw muscle and cloth detail */
+/* ------------------------------------------------------------------------- */
+
+const skinCache = new Map();
+const clothNormalCache = new Map();
+
+/** Branching dark vein drawn with a short random walk. */
+function drawVein(ctx, rnd, x, y, ang, len, width) {
+  ctx.strokeStyle = `rgba(${74 + rnd() * 26},${18 + rnd() * 12},${22 + rnd() * 12},${0.22 + rnd() * 0.28})`;
+  ctx.lineWidth = width;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  let a = ang;
+  for (let s = 0; s < len; s++) {
+    a += (rnd() - 0.5) * 0.55;
+    x += Math.cos(a) * 6;
+    y += Math.sin(a) * 6;
+    ctx.lineTo(x, y);
+    if (rnd() < 0.1 && width > 0.8) {
+      drawVein(ctx, rnd, x, y, a + (rnd() - 0.5) * 1.7, (len * 0.5) | 0, width * 0.6);
+    }
+  }
+  ctx.stroke();
+}
+
+/** Blend a radial stamp into the height/wetness buffers. */
+function stampDisc(size, height, wet, cx, cy, r, lift, wetAmt) {
+  const x0 = Math.max(0, Math.floor(cx - r));
+  const x1 = Math.min(size, Math.ceil(cx + r));
+  const y0 = Math.max(0, Math.floor(cy - r));
+  const y1 = Math.min(size, Math.ceil(cy + r));
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const d = Math.hypot(x - cx, y - cy) / r;
+      if (d > 1) continue;
+      const k = Math.cos(d * Math.PI * 0.5);
+      const i = y * size + x;
+      height[i] += lift * k;
+      wet[i] = Math.max(wet[i], wetAmt * k);
+    }
+  }
+}
+
+/**
+ * Necrotic skin: ash-pale base, bruised purple blotches, yellow necrosis,
+ * red inflammation, dark veins, open wounds and livid pustules.
+ */
+function buildNecroSkin(seed) {
+  const size = 256;
+  const n1 = fbm(size, seed, 5, 4);
+  const n2 = fbm(size, seed + 13, 4, 11);
+  const n3 = fbm(size, seed + 27, 3, 6);
+  const height = new Float32Array(size * size);
+  const wet = new Float32Array(size * size);
+  const albedo = canvasFromPixels(size, (x, y) => {
+    const i = y * size + x;
+    const v = n1[i];
+    const b = n2[i];
+    const m = n3[i];
+    let r = 198 + (v - 0.5) * 52;
+    let g = 194 + (v - 0.5) * 50;
+    let bl = 178 + (v - 0.5) * 46;
+    const bruise = clamp((m - 0.54) * 2.8, 0, 1);
+    r *= 1 - bruise * 0.2;
+    g *= 1 - bruise * 0.22;
+    bl *= 1 - bruise * 0.18;
+    const yellow = clamp((b - 0.62) * 2.8, 0, 1);
+    r += yellow * 14;
+    g += yellow * 10;
+    bl -= yellow * 18;
+    const red = clamp((b - 0.73) * 4.0, 0, 1);
+    r += red * 26;
+    g -= red * 14;
+    bl -= red * 16;
+    const flake = clamp((m - 0.76) * 5, 0, 1);
+    r += flake * 22;
+    g += flake * 20;
+    bl += flake * 14;
+    const grain = (n3[(x + 1) % size + y * size] - n3[i]) * 90;
+    height[i] = v * 0.5 + b * 0.32 + flake * 0.24 + grain * 0.1;
+    wet[i] = clamp(red * 1.4 + yellow * 0.35, 0, 1);
+    return [clamp(r, 0, 255), clamp(g, 0, 255), clamp(bl, 0, 255)];
+  });
+  const ctx = albedo._ctx;
+  const rnd = seeded(seed + 7);
+
+  for (let i = 0; i < 10; i++) {
+    drawVein(ctx, rnd, rnd() * size, rnd() * size, rnd() * Math.PI * 2, 6 + (rnd() * 9) | 0, 0.7 + rnd() * 1.3);
+  }
+
+  // open wounds with a wet, dark centre
+  for (let i = 0; i < 4; i++) {
+    const x = rnd() * size;
+    const y = rnd() * size;
+    const r = 8 + rnd() * 18;
+    const g2 = ctx.createRadialGradient(x, y, 1, x, y, r);
+    g2.addColorStop(0, 'rgba(178,46,34,0.96)');
+    g2.addColorStop(0.4, 'rgba(126,28,21,0.9)');
+    g2.addColorStop(0.78, 'rgba(62,13,11,0.6)');
+    g2.addColorStop(1, 'rgba(35,8,7,0)');
+    ctx.fillStyle = g2;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+    stampDisc(size, height, wet, x, y, r, -0.5, 1);
+    for (let c = 0; c < 5; c++) {
+      const cx = x + (rnd() - 0.5) * r * 1.3;
+      const cy = y + (rnd() - 0.5) * r * 1.3;
+      ctx.fillStyle = `rgba(${40 + rnd() * 30},${8 + rnd() * 10},${8 + rnd() * 8},0.7)`;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 1 + rnd() * 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // livid pustules and tumour nodules, raised in the normal map
+  for (let i = 0; i < 16; i++) {
+    const x = rnd() * size;
+    const y = rnd() * size;
+    const r = 1.1 + rnd() * 2.8;
+    ctx.fillStyle = 'rgba(104,40,32,0.32)';
+    ctx.beginPath();
+    ctx.arc(x, y, r * 1.8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(196,178,142,0.5)';
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(224,214,182,0.55)';
+    ctx.beginPath();
+    ctx.arc(x - r * 0.28, y - r * 0.28, r * 0.45, 0, Math.PI * 2);
+    ctx.fill();
+    stampDisc(size, height, wet, x, y, r * 1.7, 0.55, 0.4);
+  }
+
+  // dried dirt and scuffing
+  for (let i = 0; i < 90; i++) {
+    ctx.fillStyle = `rgba(${44 + rnd() * 30},${36 + rnd() * 24},${26 + rnd() * 18},${0.05 + rnd() * 0.12})`;
+    ctx.beginPath();
+    ctx.ellipse(rnd() * size, rnd() * size, 2 + rnd() * 14, 1 + rnd() * 5, rnd() * 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  const rough = canvasFromPixels(size, (x, y) => {
+    const i = y * size + x;
+    const v = clamp(206 + (n1[i] - 0.5) * 46 - wet[i] * 92, 20, 255);
+    return [v, v, v];
+  });
+
+  const map = toTexture(albedo, { srgb: true });
+  map.repeat.set(2, 2);
+  const normalMap = toTexture(normalMapFromHeight(height, size, 1.25));
+  normalMap.repeat.set(2, 2);
+  const roughnessMap = toTexture(rough);
+  roughnessMap.repeat.set(2, 2);
+  return { map, normalMap, roughnessMap };
+}
+
+/** Raw exposed muscle for wounds, tumours and flayed torsos. */
+function buildGoreSurface(seed) {
+  const size = 256;
+  const n1 = fbm(size, seed, 5, 5);
+  const n2 = fbm(size, seed + 11, 4, 17);
+  const height = new Float32Array(size * size);
+  const albedo = canvasFromPixels(size, (x, y) => {
+    const i = y * size + x;
+    // sinew fibres run roughly across the body
+    const fibre = Math.sin(y * 0.62 + n1[i] * 9 + Math.sin(x * 0.12) * 2);
+    const f = 0.5 + fibre * 0.5;
+    const dark = 0.55 + n2[i] * 0.55;
+    const r = (74 + f * 66) * dark + 24;
+    const g = (18 + f * 24) * dark + 8;
+    const b = (16 + f * 20) * dark + 6;
+    height[i] = f * 0.7 + n2[i] * 0.5;
+    return [clamp(r, 0, 255), clamp(g, 0, 255), clamp(b, 0, 255)];
+  });
+  const ctx = albedo._ctx;
+  const rnd = seeded(seed + 23);
+  const scratchWet = new Float32Array(size * size);
+  // pale tendons and dark clotted blood
+  for (let i = 0; i < 16; i++) {
+    const x = rnd() * size;
+    const y = rnd() * size;
+    ctx.strokeStyle = `rgba(${168 + rnd() * 40},${140 + rnd() * 30},${112 + rnd() * 26},0.5)`;
+    ctx.lineWidth = 1 + rnd() * 2.4;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.bezierCurveTo(x + 30, y + (rnd() - 0.5) * 20, x + 60, y + (rnd() - 0.5) * 24, x + 90, y);
+    ctx.stroke();
+  }
+  for (let i = 0; i < 18; i++) {
+    const x = rnd() * size;
+    const y = rnd() * size;
+    const r = 2 + rnd() * 9;
+    ctx.fillStyle = `rgba(${46 + rnd() * 26},${7 + rnd() * 8},${7 + rnd() * 8},0.8)`;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+    stampDisc(size, height, scratchWet, x, y, r, 0.2, 0);
+  }
+  const rough = canvasFromPixels(size, (x, y) => {
+    const v = clamp(78 + n2[y * size + x] * 70, 20, 255);
+    return [v, v, v];
+  });
+  const map = toTexture(albedo, { srgb: true });
+  map.repeat.set(2, 2);
+  const normalMap = toTexture(normalMapFromHeight(height, size, 1.7));
+  normalMap.repeat.set(2, 2);
+  const roughnessMap = toTexture(rough);
+  roughnessMap.repeat.set(2, 2);
+  return { map, normalMap, roughnessMap };
+}
+
+/** Healthy human skin: fine pores, warmth and a little unevenness. */
+function buildHumanSkin(seed) {
+  const size = 256;
+  const n1 = fbm(size, seed, 5, 4);
+  const n2 = fbm(size, seed + 19, 4, 16);
+  const n3 = fbm(size, seed + 31, 3, 42);
+  const height = new Float32Array(size * size);
+  const albedo = canvasFromPixels(size, (x, y) => {
+    const i = y * size + x;
+    const base = 224 + (n1[i] - 0.5) * 22;
+    const warm = (n2[i] - 0.5) * 14;
+    const pore = (n3[i] - 0.5) * 16;
+    height[i] = n3[i] * 0.65 + n2[i] * 0.25;
+    return [
+      clamp(base + warm + pore + 8, 0, 255),
+      clamp(base + warm * 0.5 + pore - 4, 0, 255),
+      clamp(base - warm * 0.4 + pore - 10, 0, 255),
+    ];
+  });
+  const ctx = albedo._ctx;
+  const rnd = seeded(seed + 41);
+  // faint wind-burn / broken capillaries on cheeks and knuckles
+  for (let i = 0; i < 26; i++) {
+    const x = rnd() * size;
+    const y = rnd() * size;
+    const r = 3 + rnd() * 13;
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, `rgba(196,116,104,${0.05 + rnd() * 0.09})`);
+    g.addColorStop(1, 'rgba(196,116,104,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(x - r, y - r, r * 2, r * 2);
+  }
+  // tiny moles and freckles
+  for (let i = 0; i < 60; i++) {
+    ctx.fillStyle = `rgba(${96 + rnd() * 40},${66 + rnd() * 30},${48 + rnd() * 24},${0.12 + rnd() * 0.22})`;
+    ctx.beginPath();
+    ctx.arc(rnd() * size, rnd() * size, 0.7 + rnd() * 1.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  const rough = canvasFromPixels(size, (x, y) => {
+    const i = y * size + x;
+    const v = clamp(150 + (n1[i] - 0.5) * 40 + (n3[i] - 0.5) * 26, 40, 255);
+    return [v, v, v];
+  });
+  const map = toTexture(albedo, { srgb: true });
+  map.repeat.set(1.4, 1.4);
+  const normalMap = toTexture(normalMapFromHeight(height, size, 0.6));
+  normalMap.repeat.set(1.4, 1.4);
+  const roughnessMap = toTexture(rough);
+  roughnessMap.repeat.set(1.4, 1.4);
+  return { map, normalMap, roughnessMap };
+}
+
+export function getSkinSurface(kind = 'human', variant = 0) {
+  const key = `${kind}:${variant}`;
+  if (skinCache.has(key)) return skinCache.get(key);
+  let res;
+  if (kind === 'necro') res = buildNecroSkin(1013 + variant * 131);
+  else if (kind === 'gore') res = buildGoreSurface(1201);
+  else res = buildHumanSkin(1301);
+  skinCache.set(key, res);
+  return res;
+}
+
+/** Matching normal map for the woven cloth detail textures. */
+export function getClothNormal(kind = 'jacket') {
+  if (clothNormalCache.has(kind)) return clothNormalCache.get(kind);
+  const size = 256;
+  const seed = kind === 'denim' ? 902 : kind === 'leather' ? 913 : 921;
+  const n = fbm(size, seed + 7, 4, 9);
+  const height = new Float32Array(size * size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      let v = n[y * size + x];
+      if (kind === 'denim') v += Math.sin((x + y) * 0.78) * 0.03;
+      else if (kind === 'leather') v += Math.sin(x * 0.21 + y * 0.13) * 0.05;
+      else v += Math.sin(x * 1.9) * Math.sin(y * 1.9) * 0.02;
+      height[y * size + x] = v;
+    }
+  }
+  const tex = toTexture(normalMapFromHeight(height, size, 0.9));
+  if (kind === 'denim') tex.repeat.set(3, 5);
+  else if (kind === 'leather') tex.repeat.set(2, 2);
+  else tex.repeat.set(2.5, 2.5);
+  clothNormalCache.set(kind, tex);
+  return tex;
+}

@@ -111,6 +111,7 @@
     <div class="menu-buttons">
       <button id="btn-new" class="btn primary">NEW GAME</button>
       <button id="btn-continue" class="btn" disabled>CONTINUE</button>
+      <button id="btn-replay-cinematic" class="btn ghost">REPLAY CINEMATIC</button>
       <button id="btn-settings" class="btn ghost">SETTINGS</button>
       <button id="btn-controls" class="btn ghost">CONTROLS</button>
     </div>
@@ -245,12 +246,17 @@
   <div class="intro-shade top"></div>
   <div class="intro-shade bottom"></div>
   <div id="intro-status" class="intro-status">SIGNAL ACQUIRED</div>
+  <div id="intro-loading" class="intro-loading">
+    <span class="intro-loader-ring"></span>
+    <span id="intro-loading-text">LOADING CINEMATIC…</span>
+  </div>
+  <button id="btn-intro-play" class="btn primary intro-play hidden">▶ PLAY CINEMATIC</button>
   <div id="intro-subtitle" class="intro-subtitle hidden">
     <div class="intro-speaker">NARRATION</div>
     <p id="intro-subtitle-text"></p>
   </div>
   <div class="intro-progress"><i id="intro-progress-fill"></i></div>
-  <button id="btn-intro-skip" class="btn ghost intro-skip">SKIP ▸</button>
+  <button id="btn-intro-skip" class="btn ghost intro-skip hidden">SKIP INTRO ▸</button>
 </div>
 
 <!-- ============ LOADING ============ -->

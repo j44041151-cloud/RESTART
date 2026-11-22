@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { angleLerp, clamp, rand } from '../core/utils.js';
+import { buildZombieBody } from './ZombieBody.js';
 
 /**
  * The infected of Aster.
@@ -30,8 +31,6 @@ const SPOTS = [
   [1, 66], [-18, 86], [-64, 12], [-80, -6],
   [82, -16], [92, 9], [7, -66], [-8, -78],
 ];
-
-let EYE_MAT = null;
 
 /** Bake same-material meshes into one buffer geometry (position/normal/uv). */
 function mergeSimple(geometries) {
@@ -149,192 +148,7 @@ class Zombie {
   }
 
   _build() {
-    const s = this.heightScale;
-    const skinMat = new THREE.MeshStandardMaterial({
-      color: SKINS[this.index % SKINS.length], roughness: 0.93, metalness: 0.02,
-    });
-    const shirtMat = new THREE.MeshStandardMaterial({
-      color: SHIRTS[this.index % SHIRTS.length], roughness: 0.96, metalness: 0.02,
-    });
-    const pantMat = new THREE.MeshStandardMaterial({
-      color: PANTS[this.index % PANTS.length], roughness: 0.97, metalness: 0.02,
-    });
-    const hairMat = new THREE.MeshStandardMaterial({
-      color: HAIRS[this.index % HAIRS.length], roughness: 0.99, metalness: 0.01,
-    });
-    const bloodMat = new THREE.MeshStandardMaterial({
-      color: 0x4a0f0c, roughness: 0.44, metalness: 0.08,
-    });
-    const boneMat = new THREE.MeshStandardMaterial({
-      color: 0xd6cbb0, roughness: 0.72, metalness: 0.02,
-    });
-    if (!EYE_MAT) EYE_MAT = new THREE.MeshBasicMaterial({ color: 0xb9ff8d, toneMapped: false });
-    this.skinMat = skinMat;
-    this.shirtMat = shirtMat;
-
-    const root = new THREE.Group();
-    root.scale.setScalar(s);
-    this.root = root;
-
-    const body = new THREE.Group();
-    body.position.y = this.bodyBaseY;
-    root.add(body);
-    this.body = body;
-
-    // ------------------------------------------------------------- torso --
-    const torso = new THREE.Group();
-    body.add(torso);
-    const cyl = (parent, mat, rt, rb, h, y, z = 0, seg = 10) => {
-      const m = new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, h, seg), mat);
-      m.position.set(0, y, z);
-      parent.add(m);
-      return m;
-    };
-    const ball = (parent, mat, r, x, y, z, sx = 1, sy = 1, sz = 1, seg = 12) => {
-      const m = new THREE.Mesh(new THREE.SphereGeometry(r, seg, Math.max(7, seg >> 1)), mat);
-      m.position.set(x, y, z);
-      m.scale.set(sx, sy, sz);
-      parent.add(m);
-      return m;
-    };
-    const box = (parent, mat, w, h, d, x, y, z, rx = 0, ry = 0, rz = 0) => {
-      const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
-      m.position.set(x, y, z);
-      m.rotation.set(rx, ry, rz);
-      parent.add(m);
-      return m;
-    };
-
-    cyl(torso, shirtMat, 0.185, 0.155, 0.28, 0.2, 0, 12);
-    cyl(torso, shirtMat, 0.215, 0.185, 0.3, 0.44, 0.005, 12);
-    ball(torso, shirtMat, 0.098, -0.215, 0.55, 0, 1, 0.85, 0.95);
-    ball(torso, shirtMat, 0.098, 0.215, 0.55, 0, 1, 0.85, 0.95);
-    cyl(torso, skinMat, 0.05, 0.058, 0.14, 0.64, 0.01, 8);
-
-    // torn shirt: a gash showing the belly, ragged hem and shoulder
-    ball(torso, skinMat, 0.105, 0.03, 0.19, 0.1, 1.15, 0.95, 0.45);
-    box(torso, shirtMat, 0.16, 0.05, 0.03, 0.02, 0.07, 0.15, 0, 0, 0.08);
-    box(torso, shirtMat, 0.13, 0.09, 0.03, -0.07, 0.03, 0.14, 0.1, 0, -0.22);
-    box(torso, shirtMat, 0.1, 0.07, 0.03, 0.11, 0.05, -0.12, -0.1, 0, 0.3);
-    box(torso, shirtMat, 0.09, 0.06, 0.025, -0.17, 0.44, 0.09, 0, 0.4, 0.2);
-    // exposed ribs
-    for (let i = 0; i < 3; i++) {
-      box(torso, boneMat, 0.13, 0.014, 0.035, -0.04, 0.31 + i * 0.045, 0.125, 0, 0, 0.12);
-    }
-    // wet wounds
-    ball(torso, bloodMat, 0.075, 0.075, 0.33, 0.135, 1.4, 0.75, 0.4);
-    ball(torso, bloodMat, 0.055, -0.1, 0.16, 0.115, 1.2, 0.9, 0.4);
-    ball(torso, bloodMat, 0.04, 0.13, 0.47, 0.11, 1, 1.5, 0.5);
-    mergeGroup(torso);
-    this._mark(torso, 'body');
-    this.torso = torso;
-
-    // -------------------------------------------------------------- head --
-    const head = new THREE.Group();
-    head.position.set(0, 0.6, 0.02);
-    body.add(head);
-    this.head = head;
-
-    ball(head, skinMat, 0.125, 0, 0.12, 0, 0.9, 1.06, 0.96, 16);
-    box(head, skinMat, 0.16, 0.032, 0.05, 0, 0.163, 0.088, 0.15, 0, 0);
-    ball(head, skinMat, 0.05, -0.062, 0.075, 0.06, 1, 0.9, 0.7, 10);
-    ball(head, skinMat, 0.05, 0.062, 0.075, 0.06, 1, 0.9, 0.7, 10);
-    box(head, skinMat, 0.032, 0.06, 0.05, 0, 0.1, 0.112, 0.3, 0, 0);
-    ball(head, skinMat, 0.032, -0.112, 0.11, 0, 0.45, 1, 0.7, 8);
-    ball(head, skinMat, 0.032, 0.112, 0.11, 0, 0.45, 1, 0.7, 8);
-    // sunken sockets, glowing eyes, dark maw
-    ball(head, hairMat, 0.048, -0.052, 0.134, 0.082, 1, 0.85, 0.5, 10);
-    ball(head, hairMat, 0.048, 0.052, 0.134, 0.082, 1, 0.85, 0.5, 10);
-    ball(head, EYE_MAT, 0.018, -0.052, 0.131, 0.106, 1, 1, 1, 8);
-    ball(head, EYE_MAT, 0.018, 0.052, 0.131, 0.106, 1, 1, 1, 8);
-    box(head, hairMat, 0.075, 0.028, 0.04, 0, 0.048, 0.1, 0.1, 0, 0);
-    // blood running from the mouth
-    box(head, bloodMat, 0.028, 0.09, 0.012, 0.028, 0.005, 0.112, 0, 0, 0.12);
-    box(head, bloodMat, 0.016, 0.055, 0.012, -0.02, 0.02, 0.11, 0, 0, -0.06);
-    // matted hair
-    ball(head, hairMat, 0.122, 0, 0.196, -0.018, 1.02, 0.62, 1.02, 14);
-    ball(head, hairMat, 0.105, 0, 0.135, -0.08, 1.05, 0.95, 0.8, 12);
-    ball(head, hairMat, 0.04, -0.1, 0.2, 0.045, 1, 0.7, 1, 8);
-    ball(head, hairMat, 0.036, 0.09, 0.195, 0.05, 1, 0.65, 1, 8);
-    const tuft = (x, y, z, r, h, rz) => {
-      const m = new THREE.Mesh(new THREE.ConeGeometry(r, h, 6), hairMat);
-      m.position.set(x, y, z);
-      m.rotation.set(0.2, 0.3, rz);
-      head.add(m);
-    };
-    tuft(-0.06, 0.235, 0.03, 0.04, 0.11, -0.6);
-    tuft(0.02, 0.25, 0.0, 0.038, 0.12, 0.1);
-    tuft(0.075, 0.23, -0.05, 0.034, 0.1, 1.4);
-    mergeGroup(head);
-    this._mark(head, 'head');
-
-    // jaw on its own pivot so it can hang and snap
-    const jaw = new THREE.Group();
-    jaw.position.set(0, 0.052, 0.02);
-    head.add(jaw);
-    this.jaw = jaw;
-    ball(jaw, skinMat, 0.072, 0, -0.028, 0.03, 0.92, 0.6, 0.95, 12);
-    box(jaw, skinMat, 0.075, 0.03, 0.06, 0, -0.052, 0.036);
-    mergeGroup(jaw);
-    this._mark(jaw, 'head');
-
-    // -------------------------------------------------------------- arms --
-    this.arms = [];
-    for (const side of [-1, 1]) {
-      const arm = new THREE.Group();
-      arm.position.set(side * 0.235, 0.53, 0);
-      body.add(arm);
-      cyl(arm, shirtMat, 0.078, 0.058, 0.26, -0.13, 0, 8);
-      ball(arm, shirtMat, 0.085, 0, -0.005, 0, 1, 0.9, 0.95, 10);
-      cyl(arm, skinMat, 0.054, 0.042, 0.27, -0.39, 0, 8);
-      cyl(arm, shirtMat, 0.05, 0.05, 0.055, -0.515, 0, 8);
-      ball(arm, skinMat, 0.056, 0, -0.565, 0.008, 0.9, 1.05, 0.72, 10);
-      for (let f = 0; f < 3; f++) {
-        box(arm, skinMat, 0.015, 0.075, 0.018, -0.026 + f * 0.026, -0.625, 0.012, 0.15, 0, (f - 1) * 0.12);
-      }
-      mergeGroup(arm);
-      this._mark(arm, 'limb');
-      this.arms.push(arm);
-    }
-
-    // -------------------------------------------------------------- legs --
-    this.legs = [];
-    for (const side of [-1, 1]) {
-      const leg = new THREE.Group();
-      leg.position.set(side * 0.125, this.bodyBaseY, 0);
-      root.add(leg);
-      cyl(leg, pantMat, 0.1, 0.082, 0.44, -0.22, 0, 10);
-      ball(leg, pantMat, 0.086, 0, -0.445, 0.005, 1, 0.85, 1, 8);
-      cyl(leg, pantMat, 0.076, 0.058, 0.42, -0.655, 0, 8);
-      ball(leg, pantMat, 0.06, 0, -0.865, 0, 1, 0.8, 1, 8);
-      box(leg, pantMat, 0.118, 0.085, 0.235, 0, -0.875, 0.06);
-      box(leg, pantMat, 0.126, 0.028, 0.25, 0, -0.912, 0.062);
-      mergeGroup(leg);
-      this._mark(leg, 'limb');
-      this.legs.push(leg);
-    }
-
-    // blood pool left where the body fell
-    const decal = new THREE.Mesh(
-      new THREE.CircleGeometry(0.62, 16),
-      new THREE.MeshBasicMaterial({
-        color: 0x3a0c08, transparent: true, opacity: 0.62, depthWrite: false,
-        polygonOffset: true, polygonOffsetFactor: -2, toneMapped: false,
-      })
-    );
-    decal.rotation.x = -Math.PI / 2;
-    decal.scale.set(1, 0.72, 1);
-    decal.visible = false;
-    this.system.group.add(decal);
-    this.decal = decal;
-
-    this.aimPoints = [
-      { y: (this.bodyBaseY + 0.6 + 0.13) * s, part: 'head' },
-      { y: (this.bodyBaseY + 0.34) * s, part: 'body' },
-    ];
-
-    this.system.group.add(root);
-    this.group = root;
+    buildZombieBody(this, mergeGroup);
   }
 
   _mark(group, part) {
@@ -787,7 +601,8 @@ class Zombie {
     this.head.rotation.z = 0.18 + Math.sin(this.t * 0.44) * 0.07;
     this.jaw.rotation.x = -0.12 - Math.max(0, Math.sin(this.t * 2.1)) * 0.3 - (this.winding ? 0.18 : 0);
 
-    const reach = aware ? -1.28 + this.reachBias : -0.62 + this.reachBias;
+    // Idle and wandering arms hang close to the body; only a chase reaches out.
+    const reach = aware ? -1.28 + this.reachBias : -0.24 + this.reachBias;
     const swipe = this.winding ? reach - 0.55 - Math.sin(clamp(this.windT / 0.42, 0, 1) * Math.PI) * 0.3 : reach;
     this.arms[0].rotation.x = swipe + gait * 0.12 * moveW;
     this.arms[1].rotation.x = swipe - this.limp * 0.16 - gait * 0.1 * moveW;

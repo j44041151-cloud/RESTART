@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { clamp } from '../core/utils.js';
-import { getClothTexture } from '../world/Textures.js';
+import { getClothTexture, getClothNormal, getSkinSurface } from '../world/Textures.js';
 
 const HIP_Y = 0.98;
 
@@ -101,9 +101,11 @@ export class Restorer {
     this.accent = accentMaterial || new THREE.MeshBasicMaterial({ color: 0x49c8ff, toneMapped: false });
 
     this.mat = {
-      skin: std(0xbe8668, 0.66, 0.02),
-      skinShade: std(0xa06c52, 0.72, 0.02),
-      lip: std(0x8c5a4c, 0.6, 0.02),
+      skin: std(0xc08a6c, 0.62, 0.02),
+      skinShade: std(0xa06c52, 0.68, 0.02),
+      stubble: std(0x6f5a4b, 0.9, 0.02),
+      lip: std(0x8c5a4c, 0.58, 0.02),
+      glint: new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false, transparent: true, opacity: 0.7 }),
       hair: std(0x120e0d, 0.88, 0.04),
       brow: std(0x1a1310, 0.84, 0.02),
       eyeWhite: std(0xd9d5cd, 0.3, 0.05),
@@ -151,12 +153,49 @@ export class Restorer {
       this.mat[key].needsUpdate = true;
     }
 
+    // Pore-level detail on exposed skin and matching normal maps on the
+    // fabrics, so close shots read as skin and cloth instead of plastic.
+    const skinSurf = getSkinSurface('human');
+    for (const key of ['skin', 'skinShade', 'lip', 'stubble']) {
+      const m = this.mat[key];
+      m.map = skinSurf.map;
+      m.normalMap = skinSurf.normalMap;
+      m.roughnessMap = skinSurf.roughnessMap;
+      m.normalScale.set(0.35, 0.35);
+      m.roughness = Math.min(m.roughness, 0.6);
+      m.envMapIntensity = 1.0;
+      m.needsUpdate = true;
+    }
+    const clothNormals = {
+      jacket: getClothNormal('jacket'),
+      denim: getClothNormal('denim'),
+      leather: getClothNormal('leather'),
+    };
+    for (const key of ['jacket', 'jacketPanel', 'sleeve', 'hood', 'hoodShade']) {
+      this.mat[key].normalMap = clothNormals.jacket;
+      this.mat[key].normalScale.set(0.45, 0.45);
+      this.mat[key].needsUpdate = true;
+    }
+    for (const key of ['trousers', 'trousersDark', 'strap', 'backpack']) {
+      this.mat[key].normalMap = clothNormals.denim;
+      this.mat[key].normalScale.set(0.4, 0.4);
+      this.mat[key].needsUpdate = true;
+    }
+    for (const key of ['leather', 'leatherDark', 'boots', 'glove']) {
+      this.mat[key].normalMap = clothNormals.leather;
+      this.mat[key].normalScale.set(0.5, 0.5);
+      this.mat[key].needsUpdate = true;
+    }
+    this.mat.hair.normalMap = clothNormals.jacket;
+    this.mat.hair.normalScale.set(0.9, 0.9);
+    this.mat.hair.needsUpdate = true;
+
     // Cosmetic / glow pieces are merged but skip the shadow pass; only the
     // large volumes cast shadows, which keeps the character cheap to render.
     this.noShadowMats = new Set([
       this.accent, this.mat.eyeWhite, this.mat.iris, this.mat.pupil, this.mat.brow,
       this.mat.lip, this.mat.skinShade, this.mat.tech, this.mat.techDark,
-      this.mat.leather, this.mat.leatherDark, this.mat.metal,
+      this.mat.leather, this.mat.leatherDark, this.mat.metal, this.mat.glint,
     ]);
 
     this.root = new THREE.Group();
@@ -408,22 +447,42 @@ export class Restorer {
     torso.add(head);
     this.head = head;
 
-    ball(head, M.skin, 0.12, [0, 0.098, 0.006], [0.88, 1.02, 0.94], 20);
-    ball(head, M.skin, 0.086, [0, 0.036, 0.022], [0.92, 0.8, 0.9], 16); // jaw
+    ball(head, M.skin, 0.12, [0, 0.098, 0.006], [0.84, 1.02, 0.95], 20);
+    ball(head, M.skin, 0.086, [0, 0.036, 0.022], [0.86, 0.8, 0.9], 16); // jaw
     ball(head, M.skin, 0.03, [0, 0.108, 0.112], [0.55, 0.95, 0.8], 10);
     box(head, M.skin, 0.03, 0.026, 0.036, [0, 0.092, 0.113], [0.12, 0, 0]);
     ball(head, M.skinShade, 0.026, [-0.104, 0.096, -0.004], [0.5, 1, 0.75], 10);
     ball(head, M.skinShade, 0.026, [0.104, 0.096, -0.004], [0.5, 1, 0.75], 10);
-    // eyes
+    // eyes, set in shallow lids and slightly narrower than the stylised version
     for (const sx of [-1, 1]) {
-      ball(head, M.eyeWhite, 0.0175, [sx * 0.041, 0.122, 0.1], [1, 1, 0.62], 12);
-      ball(head, M.iris, 0.0095, [sx * 0.041, 0.122, 0.11], [1, 1, 0.7], 10);
-      ball(head, M.pupil, 0.0045, [sx * 0.041, 0.122, 0.117], [1, 1, 0.8], 8);
-      box(head, M.brow, 0.056, 0.014, 0.018, [sx * 0.043, 0.147, 0.101], [0, sx * -0.1, sx * -0.13]);
-      ball(head, M.skinShade, 0.024, [sx * 0.062, 0.09, 0.072], [1, 0.7, 0.5], 8);
+      ball(head, M.eyeWhite, 0.0138, [sx * 0.039, 0.122, 0.101], [1, 1, 0.6], 12);
+      ball(head, M.iris, 0.0082, [sx * 0.039, 0.122, 0.11], [1, 1, 0.7], 10);
+      ball(head, M.pupil, 0.0038, [sx * 0.039, 0.122, 0.116], [1, 1, 0.8], 8);
+      box(head, M.brow, 0.049, 0.012, 0.018, [sx * 0.041, 0.146, 0.101], [0, sx * -0.1, sx * -0.1]);
+      ball(head, M.skinShade, 0.024, [sx * 0.06, 0.09, 0.072], [1, 0.7, 0.5], 8);
+      box(head, M.skinShade, 0.036, 0.007, 0.012, [sx * 0.039, 0.113, 0.108], [0, 0, sx * 0.06]);
+    }
+    // short beard shadow along the jaw and upper lip
+    ball(head, M.stubble, 0.026, [0, 0.032, 0.092], [1.25, 0.5, 0.62], 10);
+    for (const sx of [-1, 1]) {
+      box(head, M.stubble, 0.019, 0.05, 0.02, [sx * 0.07, 0.062, 0.068], [0.12, 0, sx * 0.2]);
+      box(head, M.stubble, 0.038, 0.011, 0.012, [sx * 0.03, 0.072, 0.103], [0.1, 0, sx * -0.08]);
     }
     box(head, M.lip, 0.044, 0.008, 0.012, [0, 0.055, 0.104]);
     box(head, M.skinShade, 0.036, 0.006, 0.012, [0, 0.066, 0.101]);
+    // eyelids, cheekbones, chin, nostrils and a catchlight in each eye make
+    // the face read as a person rather than a mannequin
+    for (const sx of [-1, 1]) {
+      ball(head, M.skinShade, 0.021, [sx * 0.041, 0.134, 0.102], [1.25, 0.4, 0.55], 10);
+      box(head, M.skin, 0.048, 0.008, 0.014, [sx * 0.041, 0.141, 0.108], [0, 0, sx * -0.08]);
+      ball(head, M.skin, 0.027, [sx * 0.072, 0.101, 0.076], [0.85, 0.7, 0.7], 10);
+      ball(head, M.skin, 0.018, [sx * 0.022, 0.083, 0.109], [1, 0.72, 0.95], 10);
+      ball(head, M.brow, 0.0065, [sx * 0.011, 0.079, 0.117], [1, 0.55, 0.55], 8);
+      ball(head, M.glint, 0.003, [sx * 0.0425, 0.128, 0.118], [1, 1, 0.6], 6);
+    }
+    box(head, M.skin, 0.024, 0.05, 0.026, [0, 0.117, 0.107], [0.12, 0, 0]);
+    ball(head, M.skin, 0.03, [0, 0.05, 0.097], [1.15, 0.8, 0.9], 12);
+    box(head, M.skinShade, 0.03, 0.038, 0.02, [0, 0.06, 0.104], [0.1, 0, 0]);
     ball(head, M.skin, 0.028, [-0.106, 0.106, 0.0], [0.45, 1.0, 0.7], 10);
     ball(head, M.skin, 0.028, [0.106, 0.106, 0.0], [0.45, 1.0, 0.7], 10);
 

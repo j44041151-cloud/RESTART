@@ -31,6 +31,8 @@ import { CoreDistrict } from './world/districts/Core.js';
 import { PlazaDistrict } from './world/districts/Plaza.js';
 
 const SETTINGS_KEY = 'restart_settings_v1';
+// Opening cinematic: once per browser session (launch), not on every reload.
+const INTRO_SEEN_KEY = 'restart_intro_seen';
 // A timer-based yield keeps loading progress moving even when the tab is
 // throttled (background tab / remote preview).
 const nextFrame = () => new Promise((r) => {
@@ -98,6 +100,7 @@ class Game {
     this.audio = new AudioEngine();
     this.audio.setMasterVolume(stored.master);
     this.audio.setMusicVolume(stored.music);
+    this.audio.setMusicState('menu');
     this.ui.applySettings(stored);
     this.ui.setSubtitles(stored.subtitles !== false);
     this.intro = new IntroCinematic({
@@ -249,6 +252,10 @@ class Game {
     } else if (autoresume) {
       sessionStorage.removeItem('restart_autoresume');
       this.continueGame();
+    } else if (!sessionStorage.getItem(INTRO_SEEN_KEY)) {
+      // First launch of this session: story cinematic before the main menu.
+      sessionStorage.setItem(INTRO_SEEN_KEY, '1');
+      this.playOpeningCinematic();
     }
   }
 
@@ -434,6 +441,7 @@ class Game {
     this.ui.setCallbacks({
       newGame: () => this.newGame(),
       continueGame: () => this.continueGame(),
+      replayCinematic: () => this.replayCinematic(),
       resume: () => this.resume(),
       restartCheckpoint: () => this.restartAtCheckpoint(),
       toMenu: () => this.toMenu(),
@@ -491,46 +499,64 @@ class Game {
 
   // ==================================================================
   /**
-   * New Game always shows the opening cinematic. A reload (used when starting
-   * over from an existing session) picks up with fromBoot=true and skips it, so
-   * the cinematic never plays twice for one New Game.
+   * New Game starts the run. The opening cinematic is a launch-time sequence
+   * (see playOpeningCinematic) and is rewatchable from the main menu, so it is
+   * never replayed here. A reload (restarting from an existing session) picks
+   * up with fromBoot=true.
    */
   newGame(fromBoot = false) {
     this.audio.init();
-    if (fromBoot) {
-      this.everStarted = true;
-      SaveSystem.clear();
-      this._beginFreshRun();
+    if (!fromBoot && this.everStarted) {
+      sessionStorage.setItem('restart_autostart', '1');
+      window.location.reload();
       return;
     }
-    const wasStarted = this.everStarted;
-    this.audio.init();
+    this.everStarted = true;
+    SaveSystem.clear();
+    this._beginFreshRun();
+  }
+
+  /**
+   * Play the opening cinematic, then land on the main menu. Never starts
+   * gameplay: the player chooses PLAY / NEW GAME afterwards.
+   */
+  playOpeningCinematic({ replay = false } = {}) {
+    if (!this.intro || this.intro.playing) return Promise.resolve('busy');
+    this.audio?.init();
     this.state = 'intro';
     this.ui.hideMenu();
     this.ui.showHUD(false);
-    this.ui.setLetterbox(false);
     this.ui.hideDialogue();
-    this._playIntro(() => {
-      this.everStarted = true;
-      if (wasStarted) {
-        sessionStorage.setItem('restart_autostart', '1');
-        window.location.reload();
-        return;
+    this.ui.setPrompt(null);
+    this.ui.setLetterbox(false);
+    this.intro.subtitles = this.uiSettings.subtitles !== false;
+    this.audio?.setMusicState('intro');
+    return this.intro.play().then((result) => {
+      this.state = 'menu';
+      this.audio?.setMusicState('menu');
+      this.introResult = result;
+      this.ui.showMenu(SaveSystem.exists());
+      this.ui.showHUD(false);
+      if (replay && result === 'unavailable') {
+        this.ui.toast('CINEMATIC UNAVAILABLE — restart_intro.mp4 NOT FOUND', 'cyan');
       }
-      SaveSystem.clear();
-      this._beginFreshRun();
+      return result;
     });
   }
 
+  replayCinematic() {
+    return this.playOpeningCinematic({ replay: true });
+  }
+
+  /** Kept for existing callers: plays the cinematic, then calls back. */
   _playIntro(done) {
-    this.ui.fade(false);
-    this.intro.subtitles = this.uiSettings.subtitles !== false;
-    this.intro.play().then(done);
+    this.playOpeningCinematic().then((result) => done && done(result));
   }
 
   _beginFreshRun() {
     this.startFresh();
     this.state = 'playing';
+    this.audio.setMusicState('exploration');
     this.ui.hideMenu();
     this.ui.showHUD(true);
     this.ui.setLetterbox(false);
@@ -588,6 +614,7 @@ class Game {
       return;
     }
     this.audio.init();
+    this.audio.setMusicState('exploration');
     this.everStarted = true;
     this.state = 'playing';
     this.ui.hideMenu();
@@ -606,6 +633,7 @@ class Game {
 
   _showEndingCard() {
     this.state = 'ending';
+    this.audio.setMusicState('ending');
     this.ui.showHUD(false);
     this.ui.setLetterbox(false);
     this.ui.hideDialogue();
@@ -755,6 +783,8 @@ class Game {
     this.ui.setPrompt(null);
     if (mission.id >= 4) return;
     this.audio.sfx('missionComplete');
+    this.audio.setMusicState('relief');
+    this.audio.relief(8);
     this.state = 'missionScreen';
     this.player.setControl(false);
     this.input.exitLock();
@@ -769,6 +799,7 @@ class Game {
   continueAfterMission() {
     this.ui.hideMissionComplete();
     this.state = 'playing';
+    this.audio.setMusicState('exploration');
     this.player.setControl(true);
     this.beginMission(this.pendingMission, true);
     this.input.requestLock();
@@ -782,6 +813,8 @@ class Game {
     this.city.setRestoration(clamp(visualProgress + (this.restoredDistricts.has('plaza') ? 0.08 : 0), 0, 1));
     this.sky.setRestoration(clamp(visualProgress * 0.94 + (this.restoredDistricts.has('plaza') ? 0.04 : 0), 0, 1));
     this.audio.setRestoration(visualProgress);
+    // Restoration is a moment of earned relief, not a victory fanfare
+    this.audio.relief(10);
     this.core.setRelays(restoredCount);
     if (name !== 'plaza') {
       this.ui.toast(`${name.toUpperCase()} DISTRICT RESTORED — RELAY ${restoredCount}/3`, 'cyan big');
@@ -793,6 +826,7 @@ class Game {
   pause() {
     if (this.state !== 'playing') return;
     this.state = 'paused';
+    this.audio.setMusicPaused(true);
     this.player.setControl(false);
     this.input.exitLock();
     this.ui.setPrompt(null);
@@ -810,6 +844,7 @@ class Game {
     this.ui.hidePause();
     this.ui.hideSettings();
     this.state = 'playing';
+    this.audio.setMusicPaused(false);
     this.player.setControl(true);
     this.input.requestLock();
   }
@@ -849,6 +884,9 @@ class Game {
     this.ui.hideDialogue();
     this.renderer.toneMappingExposure = 1;
     this.endingSequence = null;
+    this.audio.setMusicPaused(false);
+    this.audio.setThreatLevel(0, false);
+    this.audio.setMusicState('menu');
     this.ui.showMenu(SaveSystem.exists());
   }
 
@@ -866,6 +904,10 @@ class Game {
       this.player.setControl(true);
       this.respawning = false;
       this.ui.fade(false);
+      // Back in safety: let the score breathe out after the danger
+      this.audio.setMusicState('exploration');
+      this.audio.setThreatLevel(0, false);
+      this.audio.relief(6);
       this.ui.toast('CHECKPOINT RESTORED — NOTHING LOST', 'cyan');
       if (fromMenu) this.save();
     }, 560);
@@ -884,6 +926,9 @@ class Game {
     this.ui.setPrompt(null);
     this.ui.showDeath();
     this.audio.sfx('death');
+    // The chase drops away; the score holds its breath on a low danger bed
+    this.audio.setThreatLevel(0.6, false);
+    this.audio.setMusicState('danger');
     setTimeout(() => {
       const cp = this.checkpoints[this.checkpointIndex];
       this.player.teleport(cp.position.clone(), cp.yaw);
@@ -896,6 +941,8 @@ class Game {
       this.player.setControl(true);
       this.respawning = false;
       this.ui.hideDeath();
+      this.audio.setMusicState('exploration');
+      this.audio.relief(6);
       this.ui.toast('CHECKPOINT RESTORED — NOTHING LOST', 'cyan');
       this.input.requestLock();
       this.save();
@@ -910,6 +957,8 @@ class Game {
     this.combat.aiming = false;
     this.combat.laser.visible = false;
     this.combat.laserDot.visible = false;
+    this.audio.setThreatLevel(0, false);
+    this.audio.setMusicState('ending');
     this.core.restore();
     this.endingSequence = new EndingSequence(this);
     this.endingSequence.start();
@@ -993,7 +1042,7 @@ class Game {
       this.sky.update(dt, camera.position, camera);
       this.city.update(dt, camera.position, camera);
       this.vfx.update(dt, camera, this.city.restoration);
-      this.audio.update(dt, this.city.restoration);
+      this.audio.update(dt, this.city.restoration, this.player.position);
       this.render();
       return;
     }
@@ -1002,6 +1051,8 @@ class Game {
       this.sky.update(dt, this.player.position, camera);
       this.vfx.update(dt, camera, this.city.restoration);
       this.city.update(dt, this.player.position, camera);
+      // Keep the score alive here so pause/relief crossfades stay smooth.
+      this.audio.update(dt, this.city.restoration, this.player.position);
       this.render();
       return;
     }
@@ -1015,6 +1066,20 @@ class Game {
       this.player.update(dt);
       this.combat.update(dt);
       this.zombies.update(dt, this.player.position, this.combat.alive);
+
+      // Threat level feeds the ambience: muffled groans and shifting weight
+      // rise as the Hollowed close in, without ever drowning the footsteps.
+      const threat = this.zombies.nearestTo(this.player.position, 46);
+      let danger = 0;
+      if (threat) {
+        const d = Math.hypot(threat.position.x - this.player.position.x, threat.position.z - this.player.position.z);
+        danger = Math.max(0, Math.min(1, 1 - d / 46));
+      }
+      // Distant groans (ambience) follow proximity; the urgent music layer only
+      // starts when a Hollowed is actually chasing or attacking.
+      this.audio.setThreat(danger);
+      const hunting = this.zombies.zombies.some((z) => !z.dead && z.state === 'chase');
+      this.audio.setThreatLevel(danger, hunting);
 
       for (const d of this.districts) d.update(dt, this.player.position);
 
@@ -1069,7 +1134,7 @@ class Game {
       this.sky.update(dt, this.player.position, camera);
       this.city.update(dt, this.player.position, camera);
       this.vfx.update(dt, camera, this.city.restoration);
-      this.audio.update(dt, this.city.restoration);
+      this.audio.update(dt, this.city.restoration, this.player.position);
 
       // camera last so it follows the new position
       const shaking = this.shake.update(dt);
@@ -1098,7 +1163,7 @@ class Game {
       this.vfx.update(dt, camera, this.city.restoration);
       this.city.update(dt, this.player.position, camera);
       this.sky.update(dt, this.player.position, camera);
-      this.audio.update(dt, 1);
+      this.audio.update(dt, 1, this.player.position);
       this.cameraRig.update(dt, this.player.position, this.input, { paused: true });
       this._updateEnding(dt);
       this.render();
@@ -1238,6 +1303,22 @@ class Game {
       zombies() {
         return game.zombies.stats();
       },
+      audioState() {
+        return {
+          ready: game.audio.ready,
+          ctx: game.audio.ctx ? game.audio.ctx.state : 'none',
+          surface: game.player.surface,
+          duck: +game.audio.duckLevel.toFixed(2),
+          threat: +game.audio.threat.toFixed(2),
+          musicState: game.audio.musicState,
+          musicMood: game.audio.music ? game.audio.music._effectiveState() : game.audio.musicState,
+          musicPaused: !!game.audio.music?.paused,
+          musicGains: game.audio.music
+            ? Object.fromEntries(Object.entries(game.audio.music.gains).map(([k, g]) => [k, +g.gain.value.toFixed(3)]))
+            : null,
+          reverb: !!game.audio.reverb,
+        };
+      },
       damagePlayer(amount = 12) {
         game.combat.hurt(amount);
         return Math.round(game.combat.health);
@@ -1298,14 +1379,7 @@ class Game {
         return game.state;
       },
       playIntro() {
-        game.state = 'intro';
-        game.ui.hideMenu();
-        game.ui.showHUD(false);
-        game._playIntro(() => {
-          game.everStarted = true;
-          game.state = 'menu';
-          game.ui.showMenu(SaveSystem.exists());
-        });
+        game.replayCinematic();
         return game.state;
       },
       ending() {

@@ -5,14 +5,19 @@ Place the official opening cinematic here, named exactly:
 
     restart_intro.mp4
 
-The game plays it fullscreen from the New Game button:
-- narration audio comes from the video track (deep male narration)
-- subtitles are drawn by the game from js/story/Story.js (INTRO_NARRATION)
-- SKIP button, Escape, Enter or Space ends it immediately
-- if the file is absent or cannot decode, the game shows a styled fallback
-  reel with the same narration instead of a black screen
+How the game uses it:
+- on the first launch of a browser session it plays full-screen, letterboxed
+  (original aspect ratio preserved), before the main menu appears
+- a small loading indicator shows while the video buffers
+- SKIP INTRO (top right) or Escape / Enter / Space ends it and returns to the
+  main menu; the video ending does the same — gameplay never starts by itself
+- the main menu has REPLAY CINEMATIC to watch it again
+- if the browser blocks autoplay with sound, a PLAY CINEMATIC button appears
+- if the file is absent or cannot be decoded, the game shows a short
+  "CINEMATIC UNAVAILABLE" card and continues to the main menu
 
 The local server (server.ps1) already serves .mp4 as video/mp4.
 
-No placeholder video is included on purpose — only a real cinematic should be
-dropped in here.
+restart_intro.mp4 is the real 40 second, 1920x1080, H.264/AAC opening
+cinematic, included with the game. Replace it with another H.264 .mp4 of the
+same name to swap the opening; a missing file simply skips the cinematic.

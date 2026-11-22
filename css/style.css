@@ -199,6 +199,8 @@ canvas#game-canvas { position: fixed; inset: 0; width: 100%; height: 100%; displ
 /* ================= SCREENS ================= */
 .screen { position: fixed; inset: 0; z-index: 30; display: flex; align-items: center; justify-content: center; }
 #menu { background: radial-gradient(ellipse at 62% 42%, rgba(38,20,8,.45), transparent 55%), linear-gradient(120deg, rgba(4,7,9,.9) 20%, rgba(6,10,13,.72) 100%); overflow: hidden; backdrop-filter: blur(2px); }
+#menu.menu-in { animation: menuIn .7s ease both; }
+@keyframes menuIn { from { opacity: 0; transform: scale(1.015); } }
 .menu-bg-glow { position: absolute; width: 900px; height: 900px; right: -160px; top: 50%; transform: translateY(-50%); background: radial-gradient(circle, rgba(255,140,40,.18), transparent 62%); filter: blur(20px); animation: breathe 9s ease-in-out infinite; }
 @keyframes breathe { 50% { opacity: .55; transform: translateY(-50%) scale(1.12); } }
 .menu-grid {
@@ -343,15 +345,34 @@ select { background: #101619; color: #dfe9ea; border: 1px solid rgba(255,255,255
 #relay-panel[data-kind="grid"] .relay-name { color: #63ffa8; }
 
 /* ================= OPENING CINEMATIC ================= */
-#intro { position: fixed; inset: 0; z-index: 80; background: #000; overflow: hidden; display: block; }
+#intro { position: fixed; inset: 0; z-index: 80; background: #000; overflow: hidden; display: block; opacity: 1; transition: opacity .52s ease; }
 #intro.hidden { display: none !important; }
-#intro-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #000; }
+#intro.intro-leaving { opacity: 0; pointer-events: none; }
+#intro-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
 #intro-video.hidden { display: none; }
 .intro-shade { position: absolute; left: 0; right: 0; height: 22vh; pointer-events: none; z-index: 2; }
 .intro-shade.top { top: 0; background: linear-gradient(to bottom, rgba(0,0,0,.92), transparent); }
 .intro-shade.bottom { bottom: 0; background: linear-gradient(to top, rgba(0,0,0,.94), transparent); }
 .intro-status { position: absolute; top: 26px; left: 34px; z-index: 3; font-family: var(--mono); font-size: 9px; letter-spacing: 3px; color: rgba(255,255,255,.45); }
 .intro-skip { position: absolute; top: 22px; right: 30px; z-index: 6; width: auto; }
+.intro-loading {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 6;
+  display: flex; align-items: center; gap: 12px;
+  font-family: var(--mono); font-size: 9px; letter-spacing: 4px; color: rgba(255,255,255,.5);
+}
+.intro-loading.hidden { display: none !important; }
+.intro-loader-ring {
+  width: 15px; height: 15px; border-radius: 50%;
+  border: 1px solid rgba(255,255,255,.16); border-top-color: var(--amber);
+  animation: introSpin 1s linear infinite;
+}
+@keyframes introSpin { to { transform: rotate(360deg); } }
+.intro-play {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  z-index: 7; width: auto; text-align: center; padding: 15px 34px;
+}
+.intro-play:hover { transform: translate(-50%, -50%); }
+.intro-play.hidden { display: none !important; }
 .intro-progress { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: rgba(255,255,255,.08); z-index: 5; }
 .intro-progress i { display: block; height: 100%; width: 0%; background: var(--amber); box-shadow: 0 0 12px var(--amber); transition: width .2s linear; }
 .intro-subtitle {

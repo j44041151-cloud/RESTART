@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { Restorer } from './RestorerModel.js';
 import { clamp, damp, angleLerp, TAU } from '../core/utils.js';
+import { surfaceAt } from '../core/Surfaces.js';
 
 const GRAVITY = 26;
 const JUMP_SPEED = 8.9;
@@ -37,6 +38,10 @@ export class Player {
     this.speed2D = 0;
     this.airBlend = 0;
     this.stepAccum = 0;
+    this.stepSide = 1;
+    this.surface = 'concrete';
+    this.prevSurface = 'concrete';
+    this.surfaceBlend = 0;
     this.fallTimer = 0;
     this.onFall = null;
     this.onLand = null;
@@ -233,7 +238,7 @@ export class Player {
         this.coyote = 0;
         this.jumpBuffer = 0;
         jumped = true;
-        this.audio.sfx('jump');
+        this.audio.jumpSound(this.surface, wantsRun ? 0.6 : 0.45);
         if (this.onNoise) this.onNoise(this.position.clone(), 7);
         this.vfx.burst(new THREE.Vector3(this.position.x, this.position.y + 0.1, this.position.z), {
           count: 8, color: 0xd8c8a8, speed: 1.6, life: 0.6, size: 0.3, gravity: -3, up: 0.6,
@@ -244,7 +249,7 @@ export class Player {
         this.airJumps = 1;
         this.jumpBuffer = 0;
         jumped = true;
-        this.audio.sfx('jump');
+        this.audio.jumpSound(this.surface, 0.55);
         this.vfx.ring(this.position.clone().setY(this.position.y + 0.4), { color: 0x5ff2e0, radius: 2.2, life: 0.7 });
       }
     }
@@ -278,7 +283,7 @@ export class Player {
       pos.y = ground.maxY;
       if (!wasGrounded && this.velocity.y < -7) {
         const impact = clamp(-this.velocity.y / 40, 0, 1);
-        this.audio.sfx('land', { volume: 0.35 + impact * 0.5 });
+        this.audio.landSound(surfaceAt(this.position), impact);
         if (this.onNoise) this.onNoise(this.position.clone(), 8 + impact * 14);
         if (this.onLand) this.onLand(impact);
         this.vfx.burst(pos.clone().setY(pos.y + 0.05), {
@@ -320,6 +325,17 @@ export class Player {
     this.group.position.copy(pos);
     this.group.rotation.y = this.facing + this.visualYawOffset;
 
+    // ---- surface under the boots -------------------------------------
+    if (this.grounded) {
+      const surf = surfaceAt(this.position);
+      if (surf !== this.surface) {
+        this.prevSurface = this.surface;
+        this.surface = surf;
+        this.surfaceBlend = 0.55;
+      }
+    }
+    this.surfaceBlend = Math.max(0, this.surfaceBlend - dt);
+
     // ---- procedural animation ----
     this.airBlend = damp(this.airBlend, this.grounded ? 0 : 1, this.grounded ? 12 : 7, dt);
     if (this.character) {
@@ -337,10 +353,18 @@ export class Player {
     // footsteps
     if (this.grounded && speed2D > 0.6) {
       this.stepAccum += speed2D * dt;
-      const stride = wantsRun ? 2.35 : 1.75;
+      const stride = (wantsRun ? 2.35 : 1.75) * (0.95 + Math.random() * 0.1);
       if (this.stepAccum > stride) {
         this.stepAccum = 0;
-        this.audio.footstep(wantsRun ? 0.5 : 0.32);
+        this.stepSide *= -1;
+        this.audio.footstep({
+          surface: this.surface,
+          blendSurface: this.surfaceBlend > 0.02 ? this.prevSurface : null,
+          blend: this.surfaceBlend / 0.55,
+          volume: wantsRun ? 0.5 : 0.34,
+          speed: speed2D,
+          pan: this.stepSide * 0.14,
+        });
         if (this.onNoise) this.onNoise(this.position.clone(), wantsRun ? 13 : 5.5);
         if (wantsRun && Math.random() < 0.4) {
           this.vfx.burst(pos.clone().setY(pos.y + 0.06), {
